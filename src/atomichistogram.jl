@@ -20,6 +20,9 @@ mutable struct AtomicHistogram{C} <: AbstractHistogram{C}
     @atomic max_value::Int64
     const normalizing_index_offset::Int64
     const conversion_ratio::Float64
+    start_time_msec::Int64
+    end_time_msec::Int64
+    tag::Union{Nothing,String}
     const auto_resize::Bool
     @atomic total_count::Int64
     @atomic counts::AtomicCounts{C}
@@ -66,6 +69,15 @@ max_value!(h::AtomicHistogram, value) = @atomic h.max_value = value
 normalizing_index_offset(h::AtomicHistogram) = h.normalizing_index_offset
 
 conversion_ratio(h::AtomicHistogram) = h.conversion_ratio
+
+start_time_stamp(h::AtomicHistogram) = h.start_time_msec
+start_time_stamp!(h::AtomicHistogram, value) = h.start_time_msec = value
+
+end_time_stamp(h::AtomicHistogram) = h.end_time_msec
+end_time_stamp!(h::AtomicHistogram, value) = h.end_time_msec = value
+
+tag(h::AtomicHistogram) = h.tag
+tag!(h::AtomicHistogram, value) = h.tag = value
 
 auto_resize(h::AtomicHistogram) = false
 
@@ -115,6 +127,11 @@ end
 @inline function counts_inc_direct!(h::AtomicHistogram, index, value)
     i = index + 1
     return @inbounds @atomic h.counts[i] += value
+end
+
+@inline function counts_set_direct!(h::AtomicHistogram, index, value)
+    i = index + 1
+    @inbounds @atomic h.counts[i] = value
 end
 
 @inline function update_min_max!(h::AtomicHistogram, value)

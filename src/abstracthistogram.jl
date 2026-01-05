@@ -4,11 +4,13 @@ abstract type AbstractHistogram{C<:Signed} end
 
 counts_init(::Type{<:AbstractHistogram{C}}, counts_len) where {C} = zeros(C, counts_len)
 
-function _init(H::Type{<:AbstractHistogram{C}},
+function _init_with_config(H::Type{<:AbstractHistogram{C}},
     lowest_discernible_value::Int64,
     highest_trackable_value::Int64,
     significant_figures::Int64,
-    auto_resize::Bool) where {C}
+    auto_resize::Bool,
+    conversion_ratio::Float64,
+    normalizing_index_offset::Int64) where {C}
     if !(0 <= significant_figures <= 5)
         throw(ArgumentError("number of significant_figures must be between 0 and 5"))
     end
@@ -50,7 +52,17 @@ function _init(H::Type{<:AbstractHistogram{C}},
     return H(lowest_discernible_value, highest_trackable_value, unit_magnitude,
         significant_figures, sub_bucket_half_count_magnitude,
         sub_bucket_half_count, sub_bucket_mask, sub_bucket_count, leading_zero_count_base,
-        bucket_count, typemax(Int64), 0, 0, 1.0, auto_resize, 0, counts_init(H, counts_len))
+        bucket_count, typemax(Int64), 0, normalizing_index_offset, conversion_ratio,
+        typemax(Int64), 0, nothing, auto_resize, 0, counts_init(H, counts_len))
+end
+
+function _init(H::Type{<:AbstractHistogram{C}},
+    lowest_discernible_value::Int64,
+    highest_trackable_value::Int64,
+    significant_figures::Int64,
+    auto_resize::Bool) where {C}
+    return _init_with_config(H, lowest_discernible_value, highest_trackable_value,
+        significant_figures, auto_resize, 1.0, 0)
 end
 
 """
@@ -72,6 +84,9 @@ function reset!(h::AbstractHistogram{C}) where {C}
     total_count!(h, 0)
     min_value!(h, typemax(Int64))
     max_value!(h, 0)
+    start_time_stamp!(h, typemax(Int64))
+    end_time_stamp!(h, 0)
+    tag!(h, nothing)
     fill!(counts(h), 0)
 end
 
@@ -302,6 +317,10 @@ function Base.max(h::AbstractHistogram{C}) where {C}
     return highest_equivalent_value(h, max_value(h))
 end
 
+function max_value_as_double(h::AbstractHistogram{C}) where {C}
+    return max(h) * conversion_ratio(h)
+end
+
 function Base.min(h::AbstractHistogram{C}) where {C}
     if count_at_index(h, 0) > zero(C)
         return 0
@@ -410,6 +429,10 @@ end
 function count_at_index(h::AbstractHistogram, index::Int64)
     index >= 0 || throw(ArgumentError("index $index must be >= 0"))
     return counts_get_normalised(h, index)
+end
+
+@inline function counts_set_direct!(h::AbstractHistogram, index, value)
+    @inbounds counts(h)[index+1] = value
 end
 
 function percentile_print(io::IO, h::AbstractHistogram, ticks_per_half_distance, value_scale)

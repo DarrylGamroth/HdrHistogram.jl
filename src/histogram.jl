@@ -13,6 +13,9 @@ mutable struct Histogram{C} <: AbstractHistogram{C}
     max_value::Int64
     const normalizing_index_offset::Int64
     const conversion_ratio::Float64
+    start_time_msec::Int64
+    end_time_msec::Int64
+    tag::Union{Nothing,String}
     const auto_resize::Bool
     total_count::Int64
     counts::Vector{C}
@@ -49,6 +52,15 @@ max_value!(h::Histogram, value) = h.max_value = value
 normalizing_index_offset(h::Histogram) = h.normalizing_index_offset
 
 conversion_ratio(h::Histogram) = h.conversion_ratio
+
+start_time_stamp(h::Histogram) = h.start_time_msec
+start_time_stamp!(h::Histogram, value) = h.start_time_msec = value
+
+end_time_stamp(h::Histogram) = h.end_time_msec
+end_time_stamp!(h::Histogram, value) = h.end_time_msec = value
+
+tag(h::Histogram) = h.tag
+tag!(h::Histogram, value) = h.tag = value
 
 auto_resize(h::Histogram) = h.auto_resize
 

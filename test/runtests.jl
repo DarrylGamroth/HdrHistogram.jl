@@ -201,6 +201,38 @@ end
     @test HdrHistogram.max_value(h) == 20
 end
 
+@testset "Concurrent Histogram" begin
+    h = HdrHistogram.ConcurrentHistogram(1, 1000, 2)
+    HdrHistogram.record_value!(h, 10)
+    HdrHistogram.record_value!(h, 20, 2)
+    @test HdrHistogram.count_at_value(h, 10) == 1
+    @test HdrHistogram.count_at_value(h, 20) == 2
+    @test HdrHistogram.total_count(h) == 3
+    @test HdrHistogram.min_value(h) == 10
+    @test HdrHistogram.max_value(h) == 20
+
+    auto = HdrHistogram.ConcurrentHistogram(3)
+    HdrHistogram.record_value!(auto, 1)
+    HdrHistogram.record_value!(auto, 10_000_000)
+    @test HdrHistogram.total_count(auto) == 2
+    @test HdrHistogram.highest_trackable_value(auto) >= 10_000_000
+end
+
+@testset "Synchronized Histogram" begin
+    h = HdrHistogram.SynchronizedHistogram(1, 1000, 2)
+    HdrHistogram.record_value!(h, 10)
+    HdrHistogram.record_value!(h, 20, 2)
+    @test HdrHistogram.count_at_value(h, 10) == 1
+    @test HdrHistogram.count_at_value(h, 20) == 2
+    @test HdrHistogram.total_count(h) == 3
+    @test HdrHistogram.min_value(h) == 10
+    @test HdrHistogram.max_value(h) == 20
+
+    lock(h) do
+        @test HdrHistogram.count_at_value(h, 20) == 2
+    end
+end
+
 @testset "Interval Recorder" begin
     r = HdrHistogram.IntervalRecorder(HdrHistogram.Histogram(1, 1000, 2))
     HdrHistogram.record_value!(r, 10)
@@ -214,6 +246,61 @@ end
     interval2 = HdrHistogram.interval_histogram(r, interval)
     @test HdrHistogram.total_count(interval2) == 1
     @test HdrHistogram.count_at_value(interval2, 10) == 1
+end
+
+@testset "Encoding Roundtrip" begin
+    h = HdrHistogram.Histogram(1, 1000, 3)
+    for v in 1:100
+        HdrHistogram.record_value!(h, v)
+    end
+    buf = HdrHistogram.encode_into_byte_buffer(h)
+    decoded = HdrHistogram.decode_from_byte_buffer(buf)
+    @test HdrHistogram.total_count(decoded) == HdrHistogram.total_count(h)
+    @test min(decoded) == min(h)
+    @test max(decoded) == max(h)
+    @test HdrHistogram.value_at_percentile(decoded, 99.0) == HdrHistogram.value_at_percentile(h, 99.0)
+end
+
+@testset "Encoding Compressed Roundtrip" begin
+    h = HdrHistogram.Histogram(1, 1000, 3)
+    for v in 1:100
+        HdrHistogram.record_value!(h, v)
+    end
+    buf = HdrHistogram.encode_into_compressed_byte_buffer(h)
+    decoded = HdrHistogram.decode_from_compressed_byte_buffer(buf)
+    @test HdrHistogram.total_count(decoded) == HdrHistogram.total_count(h)
+    @test min(decoded) == min(h)
+    @test max(decoded) == max(h)
+end
+
+@testset "Log Reader Writer Roundtrip" begin
+    h = HdrHistogram.Histogram(1, 1000, 2)
+    HdrHistogram.record_value!(h, 10)
+    HdrHistogram.record_value!(h, 20)
+    HdrHistogram.start_time_stamp!(h, 1_000)
+    HdrHistogram.end_time_stamp!(h, 2_000)
+    HdrHistogram.tag!(h, "example")
+    io = IOBuffer()
+    writer = HdrHistogram.HistogramLogWriter(io)
+    HdrHistogram.output_interval_histogram(writer, h)
+    seekstart(io)
+    reader = HdrHistogram.HistogramLogReader(io)
+    decoded = HdrHistogram.next_interval_histogram(reader)
+    @test decoded !== nothing
+    @test HdrHistogram.total_count(decoded) == 2
+    @test HdrHistogram.tag(decoded) == "example"
+    @test HdrHistogram.start_time_stamp(decoded) == 1000
+    @test HdrHistogram.end_time_stamp(decoded) == 2000
+end
+
+@testset "Log Reader Java Sample" begin
+    path = "/home/dgamroth/workspaces/codex/HdrHistogram/src/test/resources/org/HdrHistogram/jHiccup-2.0.6.logV1.hlog"
+    io = open(path, "r")
+    reader = HdrHistogram.HistogramLogReader(io)
+    decoded = HdrHistogram.next_interval_histogram(reader)
+    close(io)
+    @test decoded !== nothing
+    @test HdrHistogram.total_count(decoded) > 0
 end
 
 @testset "Recorded Values Iterator" begin

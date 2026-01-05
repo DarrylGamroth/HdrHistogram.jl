@@ -11,18 +11,17 @@ implementation.  The current supported features are:
 
 * Standard histogram with parametric count size (64 bit counts default)
 * Atomic histograms
+* Concurrent histograms (concurrent recording; queries are not synchronized)
+* Synchronized histograms (recording/query methods are locked)
 * All iterator types (all values, recorded, percentiles, linear, logarithmic)
 * Auto-resizing of histograms
 * Reader/writer phaser and interval recorder
-
-Features not supported, but planned:
-
-* Histogram serialisation (encoding version 1.2, decoding 1.0-1.2)
+* Histogram encoding/decoding (V2 encode, V0-V2 decode)
+* Histogram log reader/writer
 
 Features unlikely to be implemented:
 
 * Double histograms
-* Concurrent histograms
 
 # Performance notes
 
@@ -31,6 +30,8 @@ Features unlikely to be implemented:
 * `perf/iterator_alloc.jl` prints allocation counts for recording and iterator passes.
 * On Julia < 1.12, add `Atomix` to use atomic histograms: `import Pkg; Pkg.add("Atomix")`.
 * For zero-allocation iteration, construct iterators (and state) outside hot loops and reuse them.
+* For `SynchronizedHistogram`, keep iterators and multi-step reads inside `lock(h) do ... end` blocks.
+* `ConcurrentHistogram` auto-resize serializes recording; prefer a fixed range for contention-free updates.
 
 # Simple Tutorial
 
