@@ -475,6 +475,18 @@ end
     @test alloc == 0
 end
 
+@testset "No Alloc Recorders" begin
+    atomic = HdrHistogram.AtomicHistogram(1, 1000, 2)
+    concurrent = HdrHistogram.ConcurrentHistogram(1, 1000, 2)
+    recorder = HdrHistogram.Recorder(HdrHistogram.ConcurrentHistogram(1, 1000, 2))
+    single = HdrHistogram.SingleWriterRecorder(HdrHistogram.Histogram(1, 1000, 2))
+
+    @test @allocated(HdrHistogram.record_value!(atomic, 10)) == 0
+    @test @allocated(HdrHistogram.record_value!(concurrent, 10)) == 0
+    @test @allocated(HdrHistogram.record_value!(recorder, 10)) == 0
+    @test @allocated(HdrHistogram.record_value!(single, 10)) == 0
+end
+
 @testset "No Alloc Iterator" begin
     h = HdrHistogram.Histogram(1, 1000, 2)
     for v in 1:10
