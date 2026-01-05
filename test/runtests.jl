@@ -1,4 +1,5 @@
 using Test
+using Base64
 using HdrHistogram
 
 const LOWEST = 1
@@ -366,6 +367,43 @@ end
     @test accumulated !== nothing
     @test HdrHistogram.total_count(accumulated) == 2
     @test "tagged" in tags
+end
+
+@testset "Java Interop" begin
+    javac = Sys.which("javac")
+    java = Sys.which("java")
+    if javac === nothing || java === nothing
+        @test_skip "java/javac not available"
+    else
+        java_repo = "/home/dgamroth/workspaces/codex/HdrHistogram"
+        java_src = joinpath(java_repo, "src", "main", "java")
+        interop_src = joinpath(@__DIR__, "interop", "org", "HdrHistogram", "JavaInterop.java")
+        mktempdir() do builddir
+            interop_src_root = joinpath(@__DIR__, "interop")
+            run(`$javac -cp $java_src -sourcepath $(java_src):$(interop_src_root) -d $builddir $interop_src`)
+            classpath = string(builddir, ":", java_src)
+
+            payload = readchomp(`$java -cp $classpath org.HdrHistogram.JavaInterop encode 1 1000000 3 1 2 3 10:4 1000:2`)
+            decoded = HdrHistogram.decode_from_compressed_byte_buffer(base64decode(payload))
+            @test HdrHistogram.total_count(decoded) == 9
+            @test HdrHistogram.count_at_value(decoded, 10) == 4
+            @test HdrHistogram.count_at_value(decoded, 1000) == 2
+
+            h = HdrHistogram.Histogram(1, 1000000, 3)
+            for v in (1, 2, 3)
+                HdrHistogram.record_value!(h, v)
+            end
+            HdrHistogram.record_value!(h, 10, 4)
+            HdrHistogram.record_value!(h, 1000, 2)
+            payload2 = base64encode(HdrHistogram.encode_into_compressed_byte_buffer(h))
+            stats = readchomp(`$java -cp $classpath org.HdrHistogram.JavaInterop decode $payload2`)
+            parts = split(stats, ',')
+            @test parse(Int64, parts[1]) == HdrHistogram.total_count(h)
+            @test parse(Int64, parts[2]) == min(h)
+            @test parse(Int64, parts[3]) == max(h)
+            @test parse(Int64, parts[4]) == HdrHistogram.value_at_percentile(h, 99.0)
+        end
+    end
 end
 
 @testset "Recorded Values Iterator" begin
