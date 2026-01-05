@@ -10,7 +10,7 @@ abstract type AbstractHistogramItem end
 
 abstract type AbstractHistogramIteratorStateSpecific end
 
-struct HistogramIteratorState{S<:AbstractHistogramIteratorStateSpecific} <: AbstractHistogramIteratorState
+mutable struct HistogramIteratorState{S<:AbstractHistogramIteratorStateSpecific} <: AbstractHistogramIteratorState
     total_count::Int64
     current_index::Int64
     current_value_at_index::Int64
@@ -78,18 +78,18 @@ function Base.iterate(iter::AbstractHistogramIterator, state::AbstractHistogramI
             break
         end
         count = count_at_index(h, state.current_index)
-        @reset state.count_at_this_value = count
+        state.count_at_this_value = count
         if state.fresh_sub_bucket
-            @reset state.total_count_to_current_index += count
-            @reset state.total_value_to_current_index += count * highest_equivalent_value(h, state.current_value_at_index)
-            @reset state.fresh_sub_bucket = false
+            state.total_count_to_current_index += count
+            state.total_value_to_current_index += count * highest_equivalent_value(h, state.current_value_at_index)
+            state.fresh_sub_bucket = false
         end
         if reached_iteration_level(iter, state)
             val_iter_to = value_iterated_to(iter, state)
             current_iteration_value = HistogramIterationValue(val_iter_to, state)
 
-            @reset state.previous_value_iterated_to = val_iter_to
-            @reset state.total_count_to_previous_index = state.total_count_to_current_index
+            state.previous_value_iterated_to = val_iter_to
+            state.total_count_to_previous_index = state.total_count_to_current_index
 
             state = increment_iteration_level(iter, state)
 
@@ -100,10 +100,10 @@ function Base.iterate(iter::AbstractHistogramIterator, state::AbstractHistogramI
             return current_iteration_value, state
         end
 
-        @reset state.fresh_sub_bucket = true
-        @reset state.current_index += 1
-        @reset state.current_value_at_index = value_at_index(h, state.current_index)
-        @reset state.next_value_at_index = value_at_index(h, state.current_index + 1)
+        state.fresh_sub_bucket = true
+        state.current_index += 1
+        state.current_value_at_index = value_at_index(h, state.current_index)
+        state.next_value_at_index = value_at_index(h, state.current_index + 1)
     end
 
     if state.total_count_to_current_index > state.total_count_to_previous_index
@@ -113,7 +113,7 @@ function Base.iterate(iter::AbstractHistogramIterator, state::AbstractHistogramI
         current_iteration_value = HistogramIterationValue(val_iter_to, state)
 
         # we do this one time only
-        @reset state.total_count_to_previous_index = state.total_count_to_current_index
+        state.total_count_to_previous_index = state.total_count_to_current_index
 
         return current_iteration_value, state
     end

@@ -61,6 +61,8 @@ jobs:
         with:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
+      - name: Install Atomix for Julia < 1.12
+        run: julia -e 'if VERSION < v"1.12"; using Pkg; Pkg.add("Atomix"); end'
       - uses: julia-actions/cache@v2
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1

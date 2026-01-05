@@ -19,12 +19,41 @@ const SCALED_INTERVAL = INTERVAL * SCALE
     @test HdrHistogram.counts_index(h, 0, 0) == 0
 end
 
+struct DummyHistogram <: HdrHistogram.AbstractHistogram{Int64}
+    offset::Int64
+    len::Int64
+end
+
+HdrHistogram.normalizing_index_offset(h::DummyHistogram) = h.offset
+HdrHistogram.counts_length(h::DummyHistogram) = h.len
+
+@testset "Normalize Index" begin
+    h = DummyHistogram(3, 10)
+    @test HdrHistogram.normalize_index(h, 2) == 9
+    @test HdrHistogram.normalize_index(h, 12) == 9
+    @test HdrHistogram.normalize_index(h, 15) == 2
+end
+
 @testset "Empty" begin
     h = HdrHistogram.Histogram(Int64, LOWEST, HIGHEST, SIGNIFICANT)
     @test min(h) == typemax(Int64)
     @test max(h) == 0
     @test HdrHistogram.mean(h) == 0
     @test HdrHistogram.stddev(h) == 0
+end
+
+@testset "Min Tracking Count Type" begin
+    h = HdrHistogram.Histogram(Int8, 1, 1000, 2)
+    @test min(h) == typemax(Int64)
+    HdrHistogram.record_value!(h, 300)
+    @test HdrHistogram.min_value(h) == 300
+end
+
+@testset "Bucket Sizing Count Type" begin
+    h1 = HdrHistogram.Histogram(Int8, 1, 1_000_000, 2)
+    h2 = HdrHistogram.Histogram(Int64, 1, 1_000_000, 2)
+    @test HdrHistogram.bucket_count(h1) == HdrHistogram.bucket_count(h2)
+    @test HdrHistogram.counts_length(h1) == HdrHistogram.counts_length(h2)
 end
 
 @testset "Large Numbers" begin
@@ -134,12 +163,57 @@ end
     @test HdrHistogram.total_count(h) == 20000
 end
 
+@testset "Reset Internal Counters" begin
+    h = HdrHistogram.Histogram(Int8, 1, 1000, 2)
+    HdrHistogram.counts(h)[1] = 2
+    HdrHistogram.counts(h)[6] = 3
+    HdrHistogram.reset_internal_counters!(h)
+    @test HdrHistogram.total_count(h) == 5
+    @test HdrHistogram.min_value(h) == HdrHistogram.value_at_index(h, 5)
+    expected_max = HdrHistogram.highest_equivalent_value(h, HdrHistogram.value_at_index(h, 5))
+    @test HdrHistogram.max_value(h) == expected_max
+end
+
 @testset "Out of range" begin
     h = HdrHistogram.Histogram(1, 1000, 4)
     # @test HdrHistogram.record_value!(h, 32767)
     @test_throws ArgumentError HdrHistogram.record_value!(h, -1)
     @test_throws ArgumentError HdrHistogram.record_value!(h, 32767, 0)
     @test_throws ArgumentError HdrHistogram.record_value!(h, 32768)
+end
+
+@testset "Auto Resize" begin
+    h = HdrHistogram.Histogram(3)
+    HdrHistogram.record_value!(h, 1)
+    HdrHistogram.record_value!(h, 10_000_000)
+    @test HdrHistogram.total_count(h) == 2
+    @test HdrHistogram.highest_trackable_value(h) >= 10_000_000
+end
+
+@testset "Atomic Histogram" begin
+    h = HdrHistogram.AtomicHistogram(1, 1000, 2)
+    HdrHistogram.record_value!(h, 10)
+    HdrHistogram.record_value!(h, 20, 2)
+    @test HdrHistogram.count_at_value(h, 10) == 1
+    @test HdrHistogram.count_at_value(h, 20) == 2
+    @test HdrHistogram.total_count(h) == 3
+    @test HdrHistogram.min_value(h) == 10
+    @test HdrHistogram.max_value(h) == 20
+end
+
+@testset "Interval Recorder" begin
+    r = HdrHistogram.IntervalRecorder(HdrHistogram.Histogram(1, 1000, 2))
+    HdrHistogram.record_value!(r, 10)
+    HdrHistogram.record_value!(r, 20)
+    interval = HdrHistogram.interval_histogram(r)
+    @test HdrHistogram.total_count(interval) == 2
+    @test HdrHistogram.count_at_value(interval, 10) == 1
+    @test HdrHistogram.count_at_value(interval, 20) == 1
+
+    HdrHistogram.record_value!(r, 10)
+    interval2 = HdrHistogram.interval_histogram(r, interval)
+    @test HdrHistogram.total_count(interval2) == 1
+    @test HdrHistogram.count_at_value(interval2, 10) == 1
 end
 
 @testset "Recorded Values Iterator" begin
@@ -171,6 +245,96 @@ end
     end
     @test total_added_count == 20000
     @test total_added_count == HdrHistogram.total_count(h)
+end
+
+@testset "Percentile Output Type" begin
+    h = HdrHistogram.Histogram(Int8, 1, 1000, 2)
+    HdrHistogram.record_value!(h, 10)
+    values = HdrHistogram.value_at_percentile(h, [50.0, 100.0])
+    @test eltype(values) == Int64
+end
+
+@testset "No Alloc Record Value" begin
+    h = HdrHistogram.Histogram(1, 1000, 2)
+    function record_loop!(hist)
+        for _ in 1:1000
+            HdrHistogram.record_value!(hist, 1)
+        end
+        return nothing
+    end
+    record_loop!(h)
+    alloc = @allocated record_loop!(h)
+    @test alloc == 0
+end
+
+@testset "No Alloc Iterator" begin
+    h = HdrHistogram.Histogram(1, 1000, 2)
+    for v in 1:10
+        HdrHistogram.record_value!(h, v)
+    end
+    function iter_recorded_state(iter, state)
+        while true
+            res = iterate(iter, state)
+            res === nothing && return nothing
+            _, state = res
+        end
+    end
+    iter = HdrHistogram.RecordedValuesIterator(h)
+    state = HdrHistogram.HistogramIteratorState(iter)
+    iter_recorded_state(iter, state)
+    alloc = @allocated iter_recorded_state(iter, state)
+    @test alloc == 0
+end
+
+@testset "Recorded Values Iterator Zero" begin
+    h = HdrHistogram.Histogram(1, 8, 1)
+    HdrHistogram.record_value!(h, 0)
+    HdrHistogram.record_value!(h, 1)
+    values = Int64[]
+    for i in HdrHistogram.RecordedValuesIterator(h)
+        push!(values, HdrHistogram.value_iterated_to(i))
+    end
+    @test values == [0, 1]
+end
+
+@testset "All Values Iterator Range" begin
+    h = HdrHistogram.Histogram(1, 8, 1)
+    HdrHistogram.record_value!(h, 0)
+    HdrHistogram.record_value!(h, 1)
+    count = 0
+    first_value = nothing
+    last_value = nothing
+    for i in HdrHistogram.AllValuesIterator(h)
+        v = HdrHistogram.value_iterated_to(i)
+        if count == 0
+            first_value = v
+        end
+        last_value = v
+        count += 1
+    end
+    @test count == HdrHistogram.counts_length(h)
+    @test first_value == 0
+    last_index_value = HdrHistogram.value_at_index(h, HdrHistogram.counts_length(h) - 1)
+    @test last_value == HdrHistogram.highest_equivalent_value(h, last_index_value)
+end
+
+@testset "All Values Iterator Empty" begin
+    h = HdrHistogram.Histogram(1, 8, 1)
+    count = 0
+    first_value = nothing
+    last_value = nothing
+    for i in HdrHistogram.AllValuesIterator(h)
+        v = HdrHistogram.value_iterated_to(i)
+        if count == 0
+            first_value = v
+        end
+        last_value = v
+        count += 1
+    end
+    @test count == HdrHistogram.counts_length(h)
+    @test first_value == 0
+    last_index_value = HdrHistogram.value_at_index(h, HdrHistogram.counts_length(h) - 1)
+    @test last_value == HdrHistogram.highest_equivalent_value(h, last_index_value)
 end
 
 # This test is from the C implementation which allows concurrent modification
@@ -290,6 +454,14 @@ end
     for (p, v) in zip(percentiles, vals)
         compare_values(HdrHistogram.value_at_percentile(h, p), v, 0.001)
     end
+
+    @test_throws ArgumentError HdrHistogram.value_at_percentile(h, [99.0, 50.0])
+end
+
+@testset "Significant Figures Zero" begin
+    h = HdrHistogram.Histogram(1, 2, 0)
+    @test HdrHistogram.significant_figures(h) == 0
+    @test HdrHistogram.counts_length(h) > 0
 end
 
 @testset "Percentile Iterator" begin

@@ -2,12 +2,14 @@ abstract type AbstractHistogram{C<:Signed} end
 
 #### MEMORY ####
 
+counts_init(::Type{<:AbstractHistogram{C}}, counts_len) where {C} = zeros(C, counts_len)
+
 function _init(H::Type{<:AbstractHistogram{C}},
     lowest_discernible_value::Int64,
     highest_trackable_value::Int64,
     significant_figures::Int64,
     auto_resize::Bool) where {C}
-    if !(0 < significant_figures <= 5)
+    if !(0 <= significant_figures <= 5)
         throw(ArgumentError("number of significant_figures must be between 0 and 5"))
     end
 
@@ -42,13 +44,13 @@ function _init(H::Type{<:AbstractHistogram{C}},
     sub_bucket_half_count = sub_bucket_count >> 1
     sub_bucket_mask = (sub_bucket_count - 1) << unit_magnitude
 
-    bucket_count = buckets_needed_to_cover_value(C, highest_trackable_value, sub_bucket_count, unit_magnitude)
+    bucket_count = buckets_needed_to_cover_value(highest_trackable_value, sub_bucket_count, unit_magnitude)
     counts_len = (bucket_count + 1) * sub_bucket_half_count
 
     return H(lowest_discernible_value, highest_trackable_value, unit_magnitude,
         significant_figures, sub_bucket_half_count_magnitude,
         sub_bucket_half_count, sub_bucket_mask, sub_bucket_count, leading_zero_count_base,
-        bucket_count, typemax(C), 0, 0, 1.0, auto_resize, 0, zeros(C, counts_len))
+        bucket_count, typemax(Int64), 0, 0, 1.0, auto_resize, 0, counts_init(H, counts_len))
 end
 
 """
@@ -68,7 +70,7 @@ end
 
 function reset!(h::AbstractHistogram{C}) where {C}
     total_count!(h, 0)
-    min_value!(h, typemax(C))
+    min_value!(h, typemax(Int64))
     max_value!(h, 0)
     fill!(counts(h), 0)
 end
@@ -79,7 +81,7 @@ function resize!(h::AbstractHistogram{C}, highest_trackable_value) where {C}
     if !(highest_trackable_value >= lowest_discernible_value(h) * 2)
         throw(ArgumentError("highest_trackable_value must be >= 2 * lowest_discernible_value"))
     end
-    bucket_count = buckets_needed_to_cover_value(C, highest_trackable_value, sub_bucket_count(h), unit_magnitude(h))
+    bucket_count = buckets_needed_to_cover_value(highest_trackable_value, sub_bucket_count(h), unit_magnitude(h))
     counts_len = (bucket_count + 1) * sub_bucket_half_count(h)
     old_len = counts_length(h)
     Base.resize!(counts(h), counts_len)
@@ -99,7 +101,7 @@ end
     if normalized_index < 0
         normalized_index += array_length
     elseif normalized_index >= array_length
-        normalized_index -= -array_length
+        normalized_index -= array_length
     end
 
     return normalized_index
@@ -208,11 +210,11 @@ function reset_internal_counters!(h::AbstractHistogram{C}) where {C}
     observed_total_count = 0
 
     # For compatability all indicies are 0-based
-    for i in 0:counts_length-1
+    for i in 0:counts_length(h)-1
         if (count = counts_get_direct(h, i)) > 0
             observed_total_count += count
             max_index = i
-            if min_non_zero_index == -1 && i != 1
+            if min_non_zero_index == -1 && i != 0
                 min_non_zero_index = i
             end
         end
@@ -226,7 +228,7 @@ function reset_internal_counters!(h::AbstractHistogram{C}) where {C}
     end
 
     if min_non_zero_index == -1
-        min_value!(h, typemax(C))
+        min_value!(h, typemax(Int64))
     else
         min_value!(h, value_at_index(h, min_non_zero_index))
     end
@@ -234,11 +236,11 @@ function reset_internal_counters!(h::AbstractHistogram{C}) where {C}
     total_count!(h, observed_total_count)
 end
 
-function buckets_needed_to_cover_value(C::Type{<:Integer}, value, sub_bucket_count, unit_magnitude)
+function buckets_needed_to_cover_value(value, sub_bucket_count, unit_magnitude)
     smallest_untrackable_value = Int64(sub_bucket_count) << (unit_magnitude % 64)
     buckets_needed = 1
     while smallest_untrackable_value <= value
-        if smallest_untrackable_value > typemax(C) ÷ 2
+        if smallest_untrackable_value > typemax(Int64) ÷ 2
             return buckets_needed + 1
         end
         smallest_untrackable_value <<= 1
@@ -305,8 +307,8 @@ function Base.min(h::AbstractHistogram{C}) where {C}
         return 0
     end
 
-    if min_value(h) == typemax(C)
-        return typemax(C)
+    if min_value(h) == typemax(Int64)
+        return typemax(Int64)
     end
 
     return lowest_equivalent_value(h, min_value(h))
@@ -338,6 +340,11 @@ function value_at_percentile(h::AbstractHistogram, percentiles, values::Abstract
     if length(percentiles) != length(values)
         throw(ArgumentError("percentiles and values must have the same length"))
     end
+    @inbounds for i in 2:length(percentiles)
+        if percentiles[i] < percentiles[i-1]
+            throw(ArgumentError("percentiles must be sorted ascending"))
+        end
+    end
 
     # to avoid allocations we use the values array for intermediate computation
     # i.e. to store the expected cumulative count at each percentile
@@ -360,7 +367,7 @@ function value_at_percentile(h::AbstractHistogram, percentiles, values::Abstract
 end
 
 function value_at_percentile(h::AbstractHistogram{C}, percentiles::AbstractVector) where {C}
-    values = zeros(C, length(percentiles))
+    values = zeros(Int64, length(percentiles))
     value_at_percentile(h, percentiles, values)
     return values
 end

@@ -1,4 +1,9 @@
-using Atomix: @atomic
+@static if VERSION < v"1.12"
+    using Atomix: @atomic
+    const AtomicCounts{C} = Vector{C}
+else
+    const AtomicCounts{C} = Base.AtomicMemory{C}
+end
 
 mutable struct AtomicHistogram{C} <: AbstractHistogram{C}
     const lowest_discernible_value::Int64
@@ -17,7 +22,19 @@ mutable struct AtomicHistogram{C} <: AbstractHistogram{C}
     const conversion_ratio::Float64
     const auto_resize::Bool
     @atomic total_count::Int64
-    @atomic counts::Vector{C}
+    @atomic counts::AtomicCounts{C}
+end
+
+@static if VERSION < v"1.12"
+    counts_init(::Type{<:AtomicHistogram{C}}, counts_len) where {C} = zeros(C, counts_len)
+else
+    function counts_init(::Type{<:AtomicHistogram{C}}, counts_len) where {C}
+        counts = Base.AtomicMemory{C}(undef, counts_len)
+        for i in 1:counts_len
+            @atomic counts[i] = zero(C)
+        end
+        return counts
+    end
 end
 
 lowest_discernible_value(h::AtomicHistogram) = h.lowest_discernible_value
@@ -101,6 +118,24 @@ end
 end
 
 @inline function update_min_max!(h::AtomicHistogram, value)
-    @atomic min(h.min_value, value)
-    @atomic max(h.max_value, value)
+    @atomic h.min_value min value
+    @atomic h.max_value max value
+end
+
+@static if VERSION < v"1.12"
+    function reset!(h::AtomicHistogram{C}) where {C}
+        total_count!(h, 0)
+        min_value!(h, typemax(Int64))
+        max_value!(h, 0)
+        fill!(counts(h), zero(C))
+    end
+else
+    function reset!(h::AtomicHistogram{C}) where {C}
+        total_count!(h, 0)
+        min_value!(h, typemax(Int64))
+        max_value!(h, 0)
+        for i in 1:counts_length(h)
+            @atomic h.counts[i] = zero(C)
+        end
+    end
 end
