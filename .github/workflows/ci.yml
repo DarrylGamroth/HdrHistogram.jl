@@ -61,6 +61,10 @@ jobs:
         with:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
       - name: Install Atomix for Julia < 1.12
         run: julia -e 'if VERSION < v"1.12"; using Pkg; Pkg.add("Atomix"); end'
       - uses: julia-actions/cache@v2
