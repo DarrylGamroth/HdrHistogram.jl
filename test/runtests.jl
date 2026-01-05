@@ -402,6 +402,24 @@ end
             @test parse(Int64, parts[2]) == min(h)
             @test parse(Int64, parts[3]) == max(h)
             @test parse(Int64, parts[4]) == HdrHistogram.value_at_percentile(h, 99.0)
+
+            log_output = read(`$java -cp $classpath org.HdrHistogram.JavaInterop log 1 1000000 3 1000 2000 tag=java 10 20:2`, String)
+            reader = HdrHistogram.HistogramLogReader(IOBuffer(log_output))
+            logged = HdrHistogram.next_interval_histogram(reader)
+            @test logged !== nothing
+            @test HdrHistogram.tag(logged) == "java"
+            @test HdrHistogram.total_count(logged) == 3
+
+            corr = readchomp(`$java -cp $classpath org.HdrHistogram.JavaInterop corrected 1 1000000 3 1000 10000 1`)
+            corr_parts = split(corr, ',')
+            expected_total = parse(Int64, corr_parts[1])
+            expected_p99 = parse(Int64, corr_parts[2])
+            base = HdrHistogram.Histogram(1, 1000000, 3)
+            HdrHistogram.record_value!(base, 10000)
+            corrected = HdrHistogram.Histogram(1, 1000000, 3)
+            HdrHistogram.add_while_correcting_for_coordinated_omission(corrected, base, 1000)
+            @test HdrHistogram.total_count(corrected) == expected_total
+            @test HdrHistogram.value_at_percentile(corrected, 99.0) == expected_p99
         end
     end
 end

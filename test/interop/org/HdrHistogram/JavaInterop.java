@@ -52,6 +52,64 @@ public class JavaInterop {
             System.out.printf("%d,%d,%d,%d", total, min, max, p99);
             return;
         }
+        if ("log".equals(mode)) {
+            if (args.length < 6) {
+                throw new IllegalArgumentException("log requires lowest highest sigfigs start_msec end_msec [tag] [values...]");
+            }
+            long lowest = Long.parseLong(args[1]);
+            long highest = Long.parseLong(args[2]);
+            int sigfigs = Integer.parseInt(args[3]);
+            long startMsec = Long.parseLong(args[4]);
+            long endMsec = Long.parseLong(args[5]);
+            int valuesStart = 6;
+            String tag = null;
+            if (args.length > valuesStart && args[valuesStart].startsWith("tag=")) {
+                tag = args[valuesStart].substring(4);
+                valuesStart += 1;
+            }
+            Histogram histogram = new Histogram(lowest, highest, sigfigs);
+            for (int i = valuesStart; i < args.length; i++) {
+                String arg = args[i];
+                int colon = arg.indexOf(':');
+                long value;
+                long count = 1;
+                if (colon >= 0) {
+                    value = Long.parseLong(arg.substring(0, colon));
+                    count = Long.parseLong(arg.substring(colon + 1));
+                } else {
+                    value = Long.parseLong(arg);
+                }
+                histogram.recordValueWithCount(value, count);
+            }
+            histogram.setStartTimeStamp(startMsec);
+            histogram.setEndTimeStamp(endMsec);
+            if (tag != null && !tag.isEmpty()) {
+                histogram.setTag(tag);
+            }
+            HistogramLogWriter writer = new HistogramLogWriter(System.out);
+            writer.outputLogFormatVersion();
+            writer.outputLegend();
+            writer.outputIntervalHistogram(histogram);
+            return;
+        }
+        if ("corrected".equals(mode)) {
+            if (args.length < 6) {
+                throw new IllegalArgumentException("corrected requires lowest highest sigfigs expected_interval value [count]");
+            }
+            long lowest = Long.parseLong(args[1]);
+            long highest = Long.parseLong(args[2]);
+            int sigfigs = Integer.parseInt(args[3]);
+            long expectedInterval = Long.parseLong(args[4]);
+            long value = Long.parseLong(args[5]);
+            long count = (args.length > 6) ? Long.parseLong(args[6]) : 1;
+            Histogram histogram = new Histogram(lowest, highest, sigfigs);
+            histogram.recordValueWithCount(value, count);
+            Histogram corrected = histogram.copyCorrectedForCoordinatedOmission(expectedInterval);
+            long total = corrected.getTotalCount();
+            long p99 = corrected.getValueAtPercentile(99.0);
+            System.out.printf("%d,%d", total, p99);
+            return;
+        }
         throw new IllegalArgumentException("unknown mode: " + mode);
     }
 }
