@@ -248,6 +248,32 @@ end
     @test HdrHistogram.count_at_value(interval2, 10) == 1
 end
 
+@testset "Recorder" begin
+    r = HdrHistogram.Recorder(2)
+    HdrHistogram.record_value!(r, 10)
+    interval = HdrHistogram.interval_histogram(r)
+    @test HdrHistogram.total_count(interval) == 1
+    @test HdrHistogram.count_at_value(interval, 10) == 1
+    @test HdrHistogram.end_time_stamp(interval) >= HdrHistogram.start_time_stamp(interval)
+
+    HdrHistogram.record_value!(r, 10, 2)
+    interval2 = HdrHistogram.interval_histogram(r, interval)
+    @test HdrHistogram.total_count(interval2) == 2
+    @test HdrHistogram.count_at_value(interval2, 10) == 2
+end
+
+@testset "SingleWriterRecorder" begin
+    r = HdrHistogram.SingleWriterRecorder(2)
+    HdrHistogram.record_value!(r, 10)
+    interval = HdrHistogram.interval_histogram(r)
+    @test HdrHistogram.total_count(interval) == 1
+    @test HdrHistogram.count_at_value(interval, 10) == 1
+
+    HdrHistogram.record_corrected_value!(r, 10_000, 1000)
+    interval2 = HdrHistogram.interval_histogram(r, interval)
+    @test HdrHistogram.total_count(interval2) > 1
+end
+
 @testset "Encoding Roundtrip" begin
     h = HdrHistogram.Histogram(1, 1000, 3)
     for v in 1:100
@@ -301,6 +327,45 @@ end
     close(io)
     @test decoded !== nothing
     @test HdrHistogram.total_count(decoded) > 0
+end
+
+@testset "Log Scanner Processor" begin
+    buf = IOBuffer()
+    writer = HdrHistogram.HistogramLogWriter(buf)
+    HdrHistogram.output_log_format_version(writer)
+    HdrHistogram.output_legend(writer)
+
+    h = HdrHistogram.Histogram(1, 1000, 2)
+    HdrHistogram.record_value!(h, 10)
+    HdrHistogram.start_time_stamp!(h, 1_000)
+    HdrHistogram.end_time_stamp!(h, 2_000)
+    HdrHistogram.output_interval_histogram(writer, h)
+
+    h2 = HdrHistogram.Histogram(1, 1000, 2)
+    HdrHistogram.record_value!(h2, 20)
+    HdrHistogram.start_time_stamp!(h2, 2_000)
+    HdrHistogram.end_time_stamp!(h2, 3_000)
+    HdrHistogram.tag!(h2, "tagged")
+    HdrHistogram.output_interval_histogram(writer, h2)
+
+    seekstart(buf)
+    scanner = HdrHistogram.HistogramLogScanner(buf)
+    decoded_counts = Int[]
+    HdrHistogram.process!(scanner, on_histogram = (tag, ts, len, reader) -> begin
+        if tag == "tagged"
+            push!(decoded_counts, HdrHistogram.total_count(read(reader)))
+        end
+        false
+    end)
+    @test decoded_counts == [1]
+
+    seekstart(buf)
+    processor = HdrHistogram.HistogramLogProcessor(buf)
+    interval_out = IOBuffer()
+    accumulated, tags = HdrHistogram.process!(processor, interval_io=interval_out, all_tags=true, percentiles_io=nothing)
+    @test accumulated !== nothing
+    @test HdrHistogram.total_count(accumulated) == 2
+    @test "tagged" in tags
 end
 
 @testset "Recorded Values Iterator" begin

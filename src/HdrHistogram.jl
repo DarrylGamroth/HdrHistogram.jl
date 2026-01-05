@@ -11,7 +11,9 @@ include("abstractiterator.jl")
 include("histogramiterators.jl")
 include("encoding.jl")
 include("logio.jl")
+include("logprocessor.jl")
 include("writerreaderphaser.jl")
 include("intervalrecorder.jl")
+include("recorder.jl")
 
 end # module HdrHistogram

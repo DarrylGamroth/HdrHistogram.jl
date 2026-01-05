@@ -18,6 +18,8 @@ implementation.  The current supported features are:
 * Reader/writer phaser and interval recorder
 * Histogram encoding/decoding (V2 encode, V0-V2 decode)
 * Histogram log reader/writer
+* Recorder and SingleWriterRecorder interval sampling
+* Histogram log scanner/processor helpers
 
 Features unlikely to be implemented:
 
