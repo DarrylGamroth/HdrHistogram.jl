@@ -2,18 +2,22 @@ using HdrHistogram
 
 const HH = HdrHistogram
 
-function bench(label, f, n)
+function bench(label, n, f, args...)
     GC.gc()
-    f()
+    f(args...)
     GC.gc()
     t0 = time_ns()
     for _ in 1:n
-        f()
+        f(args...)
     end
-    elapsed = (time_ns() - t0) / 1e9
-    rate = n / elapsed
-    alloc = @allocated f()
-    println(rpad(label, 28), "ops/sec=", round(rate, digits=1), " alloc=", alloc)
+    elapsed = (time_ns() - t0)
+    ns_per = elapsed / n
+    rate = 1e9 / ns_per
+    alloc = @allocated f(args...)
+    println(rpad(label, 28),
+        "ops/sec=", round(rate, digits=1),
+        " ns/op=", round(ns_per, digits=1),
+        " alloc=", alloc)
 end
 
 hist = HH.Histogram(1, 1_000_000, 3)
@@ -21,9 +25,9 @@ for i in 1:100_000
     HH.record_value!(hist, i % 10_000)
 end
 
-bench("encode compressed", () -> HH.encode_into_compressed_byte_buffer(hist), 200)
+bench("encode compressed", 200, HH.encode_into_compressed_byte_buffer, hist)
 encoded = HH.encode_into_compressed_byte_buffer(hist)
-bench("decode compressed", () -> HH.decode_from_compressed_byte_buffer(encoded), 200)
+bench("decode compressed", 200, HH.decode_from_compressed_byte_buffer, encoded)
 
 function build_log(n)
     buf = IOBuffer()
@@ -42,11 +46,13 @@ end
 
 log_bytes = build_log(200)
 
-bench("log reader", () -> begin
-    reader = HH.HistogramLogReader(IOBuffer(log_bytes))
+function read_log!(bytes)
+    reader = HH.HistogramLogReader(IOBuffer(bytes))
     while true
         h = HH.next_interval_histogram(reader)
         h === nothing && break
     end
-    nothing
-end, 50)
+    return nothing
+end
+
+bench("log reader", 50, read_log!, log_bytes)
