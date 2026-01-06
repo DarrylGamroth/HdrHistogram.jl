@@ -1,5 +1,7 @@
 using HdrHistogram
 
+const HH = HdrHistogram
+
 function bench(label, f, n)
     GC.gc()
     f()
@@ -14,22 +16,22 @@ function bench(label, f, n)
     println(rpad(label, 28), "ops/sec=", round(rate, digits=1), " alloc=", alloc)
 end
 
-hist = Histogram(1, 1_000_000, 3)
+hist = HH.Histogram(1, 1_000_000, 3)
 for i in 1:200_000
-    record_value!(hist, i % 10_000)
+    HH.record_value!(hist, i % 10_000)
 end
 
-recorded_iter = RecordedValuesIterator(hist)
-all_iter = AllValuesIterator(hist)
-linear_iter = LinearIterator(hist, 10_000)
-log_iter = LogarithmicIterator(hist, 10_000, 2.0)
+recorded_iter = HH.RecordedValuesIterator(hist)
+all_iter = HH.AllValuesIterator(hist)
+linear_iter = HH.LinearIterator(hist, 10_000)
+log_iter = HH.LogarithmicIterator(hist, 10_000, 2.0)
 
 function consume(iter)
     total = 0
     state = iterate(iter)
     while state !== nothing
         v, st = state
-        total += count_added_in_this_iteration_step(v)
+        total += HH.count_added_in_this_iteration_step(v)
         state = iterate(iter, st)
     end
     return total
