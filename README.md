@@ -30,6 +30,7 @@ Features unlikely to be implemented:
 * Recording into fixed-size histograms is allocation-free; auto-resize and interval histogram swaps allocate by design.
 * Tests include a no-allocation check for `record_value!` on fixed histograms.
 * `perf/iterator_alloc.jl` prints allocation counts for recording and iterator passes.
+* `perf/record_bench.jl`, `perf/query_bench.jl`, `perf/iterator_bench.jl`, and `perf/logio_bench.jl` provide quick throughput/alloc benchmarks.
 * On Julia < 1.12, add `Atomix` to use atomic histograms: `import Pkg; Pkg.add("Atomix")`.
 * For zero-allocation iteration, construct iterators (and state) outside hot loops and reuse them.
 * For `SynchronizedHistogram`, keep iterators and multi-step reads inside `lock(h) do ... end` blocks.
