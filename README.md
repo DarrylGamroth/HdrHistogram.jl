@@ -35,6 +35,7 @@ Features unlikely to be implemented:
 * For zero-allocation iteration, construct iterators (and state) outside hot loops and reuse them.
 * For `SynchronizedHistogram`, keep iterators and multi-step reads inside `lock(h) do ... end` blocks.
 * `ConcurrentHistogram` auto-resize serializes recording; prefer a fixed range for contention-free updates.
+* Iterator iteration values are reused; if you need to retain values, copy the fields you need per step.
 
 # Simple Tutorial
 

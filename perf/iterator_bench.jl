@@ -32,11 +32,9 @@ log_iter = HH.LogarithmicIterator(hist, 10_000, 2.0)
 
 function consume(iter)
     total = 0
-    state = iterate(iter)
-    while state !== nothing
-        v, st = state
-        total += HH.count_added_in_this_iteration_step(v)
-        state = iterate(iter, st)
+    state = HH.HistogramIteratorState(iter)
+    while HH.iterate!(iter, state)
+        total += HH.count_added_in_this_iteration_step(state.iter_value)
     end
     return total
 end
@@ -112,12 +110,10 @@ end
 
 function consume_state(iter, state)
     total = 0
-    while true
-        res = iterate(iter, state)
-        res === nothing && return total
-        v, state = res
-        total += HH.count_added_in_this_iteration_step(v)
+    while HH.iterate!(iter, state)
+        total += HH.count_added_in_this_iteration_step(state.iter_value)
     end
+    return total
 end
 
 function consume_reset!(iter, state)

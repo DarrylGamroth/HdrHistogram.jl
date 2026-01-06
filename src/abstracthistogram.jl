@@ -297,13 +297,19 @@ end
 end
 
 function add(h::AbstractHistogram, from::AbstractHistogram)
-    for i in RecordedValuesIterator(from)
+    iter = RecordedValuesIterator(from)
+    state = HistogramIteratorState(iter)
+    while iterate!(iter, state)
+        i = state.iter_value
         record_value!(h, value_iterated_to(i), count_at_value_iterated_to(i))
     end
 end
 
 function add_while_correcting_for_coordinated_omission(h::AbstractHistogram, from::AbstractHistogram, expected_interval::Int64)
-    for i in RecordedValuesIterator(from)
+    iter = RecordedValuesIterator(from)
+    state = HistogramIteratorState(iter)
+    while iterate!(iter, state)
+        i = state.iter_value
         record_corrected_value!(h, value_iterated_to(i), expected_interval, count_at_value_iterated_to(i))
     end
 end
@@ -345,8 +351,10 @@ end
 
 function value_at_percentile(h::AbstractHistogram, percentile::Real)
     count = count_at_percentile(h, percentile)
-
-    for i in RecordedValuesIterator(h)
+    iter = RecordedValuesIterator(h)
+    state = HistogramIteratorState(iter)
+    while iterate!(iter, state)
+        i = state.iter_value
         if total_count_to_this_value(i) >= count
             return percentile == zero(typeof(percentile)) ?
                    lowest_equivalent_value(h, value_iterated_to(i)) : highest_equivalent_value(h, value_iterated_to(i))
@@ -372,11 +380,13 @@ function value_at_percentile(h::AbstractHistogram, percentiles, values::Abstract
     end
     at_pos = 1
 
-    for i in RecordedValuesIterator(h)
+    iter = RecordedValuesIterator(h)
+    state = HistogramIteratorState(iter)
+    while iterate!(iter, state)
         if at_pos > length(percentiles)
             break
         end
-
+        i = state.iter_value
         while at_pos <= length(percentiles) && total_count_to_this_value(i) >= values[at_pos]
             values[at_pos] = percentiles[at_pos] == zero(eltype(percentiles)) ?
                              lowest_equivalent_value(h, value_iterated_to(i)) : highest_equivalent_value(h, value_iterated_to(i))
@@ -397,7 +407,10 @@ function mean(h::AbstractHistogram{C}) where {C}
     if count_total == zero(C)
         return 0.0
     end
-    for i in RecordedValuesIterator(h)
+    iter = RecordedValuesIterator(h)
+    state = HistogramIteratorState(iter)
+    while iterate!(iter, state)
+        i = state.iter_value
         total += count_at_value_iterated_to(i) * median_equivalent_value(h, value_iterated_to(i))
     end
     return total / count_total
@@ -410,7 +423,10 @@ function stddev(h::AbstractHistogram{C}) where {C}
     end
     m = mean(h)
     geometric_dev_total = 0.0
-    for i in RecordedValuesIterator(h)
+    iter = RecordedValuesIterator(h)
+    state = HistogramIteratorState(iter)
+    while iterate!(iter, state)
+        i = state.iter_value
         dev = median_equivalent_value(h, value_iterated_to(i)) - m
         geometric_dev_total += dev^2 * count_at_value_iterated_to(i)
     end

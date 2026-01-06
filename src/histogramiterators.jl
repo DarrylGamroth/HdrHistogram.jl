@@ -36,6 +36,10 @@ mutable struct RecordedValuesIteratorState <: AbstractHistogramIteratorStateSpec
 end
 HistogramIteratorState(iter::RecordedValuesIterator) = HistogramIteratorState(iter, RecordedValuesIteratorState(-1))
 
+@inline function has_next(iter::RecordedValuesIterator, state::HistogramIteratorState{RecordedValuesIteratorState})
+    return has_next_base(iter, state)
+end
+
 function increment_iteration_level(iter::RecordedValuesIterator, state::HistogramIteratorState{RecordedValuesIteratorState})
     state.specifics.visited_index = state.current_index
     return state
@@ -61,7 +65,7 @@ end
 HistogramIteratorState(iter::PercentileIterator) = HistogramIteratorState(iter, PercentileIteratorState(0.0, 0.0, false))
 
 function has_next(iter::PercentileIterator, state::HistogramIteratorState{PercentileIteratorState})
-    if @invoke(has_next(iter::AbstractHistogramIterator, state::AbstractHistogramIteratorState))[1]
+    if has_next_base(iter, state)[1]
         return true, state
     end
     if !state.specifics.reached_last_recorded_value && state.total_count > 0
@@ -116,7 +120,7 @@ HistogramIteratorState(iter::LinearIterator) = HistogramIteratorState(iter,
 
 
 function has_next(iter::LinearIterator, state::HistogramIteratorState{LinearIteratorState})
-    if @invoke(has_next(iter::AbstractHistogramIterator, state::AbstractHistogramIteratorState))[1]
+    if has_next_base(iter, state)[1]
         return true, state
     end
     # If next iterate does not move to the next sub bucket index (which is empty if
@@ -157,7 +161,7 @@ HistogramIteratorState(iter::LogarithmicIterator) = HistogramIteratorState(iter,
         lowest_equivalent_value(iter.histogram, iter.value_units_per_bucket)))
 
 function has_next(iter::LogarithmicIterator, state::HistogramIteratorState{LogarithmicIteratorState})
-    if @invoke(has_next(iter::AbstractHistogramIterator, state::AbstractHistogramIteratorState))[1]
+    if has_next_base(iter, state)[1]
         return true, state
     end
     # If next iterate does not move to the next sub bucket index (which is empty if
