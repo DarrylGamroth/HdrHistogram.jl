@@ -130,7 +130,7 @@ function consume_reset!(iter, state)
     return consume_state(iter, state)
 end
 
-recorded_state = HH.recorded_values_state(recorded_iter)
+recorded_state = HH.iterator_state(recorded_iter)
 all_state = HH.HistogramIteratorState(all_iter)
 linear_state = HH.HistogramIteratorState(linear_iter)
 log_state = HH.HistogramIteratorState(log_iter)

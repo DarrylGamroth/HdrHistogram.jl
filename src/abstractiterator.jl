@@ -10,6 +10,8 @@ abstract type AbstractHistogramItem end
 
 abstract type AbstractHistogramIteratorStateSpecific end
 
+function reset_state! end
+
 mutable struct HistogramIterationValue <: AbstractHistogramItem
     value_iterated_to::Int64
     value_iterated_from::Int64
@@ -147,4 +149,10 @@ end
 
 function percentile_iterated_from(state::HistogramIteratorState)
     return 100.0 * state.total_count_to_previous_index / state.total_count
+end
+
+function iterator_state(iter::AbstractHistogramIterator)
+    state = HistogramIteratorState(iter)
+    reset_state!(iter, state)
+    return state
 end

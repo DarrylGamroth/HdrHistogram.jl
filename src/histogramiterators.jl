@@ -8,6 +8,22 @@ mutable struct AllValuesIteratorState <: AbstractHistogramIteratorStateSpecific
 end
 HistogramIteratorState(iter::AllValuesIterator) = HistogramIteratorState(iter, AllValuesIteratorState(-1))
 
+function reset_state!(iter::AllValuesIterator, state::HistogramIteratorState{AllValuesIteratorState})
+    h = histogram(iter)
+    state.total_count = total_count(h)
+    state.current_index = 0
+    state.current_value_at_index = 0
+    state.next_value_at_index = 1 << unit_magnitude(h)
+    state.previous_value_iterated_to = 0
+    state.total_count_to_previous_index = 0
+    state.total_count_to_current_index = 0
+    state.total_value_to_current_index = 0
+    state.count_at_this_value = 0
+    state.fresh_sub_bucket = true
+    state.specifics.visited_index = -1
+    return state
+end
+
 function increment_iteration_level(iter::AllValuesIterator, state::HistogramIteratorState{AllValuesIteratorState})
     state.specifics.visited_index = state.current_index
     return state
@@ -57,6 +73,10 @@ function reset_state!(iter::RecordedValuesIterator, state::HistogramIteratorStat
 end
 
 recorded_values_state(iter::RecordedValuesIterator) = HistogramIteratorState(iter)
+function recorded_values_state(h::AbstractHistogram)
+    iter = RecordedValuesIterator(h)
+    return iter, iterator_state(iter)
+end
 
 function mean(h::AbstractHistogram{C}, iter::RecordedValuesIterator{C}, state::HistogramIteratorState{RecordedValuesIteratorState}) where {C}
     reset_state!(iter, state)
@@ -161,6 +181,24 @@ mutable struct PercentileIteratorState <: AbstractHistogramIteratorStateSpecific
 end
 HistogramIteratorState(iter::PercentileIterator) = HistogramIteratorState(iter, PercentileIteratorState(0.0, 0.0, false))
 
+function reset_state!(iter::PercentileIterator, state::HistogramIteratorState{PercentileIteratorState})
+    h = histogram(iter)
+    state.total_count = total_count(h)
+    state.current_index = 0
+    state.current_value_at_index = 0
+    state.next_value_at_index = 1 << unit_magnitude(h)
+    state.previous_value_iterated_to = 0
+    state.total_count_to_previous_index = 0
+    state.total_count_to_current_index = 0
+    state.total_value_to_current_index = 0
+    state.count_at_this_value = 0
+    state.fresh_sub_bucket = true
+    state.specifics.percentile_level_iterated_to = 0.0
+    state.specifics.percentile_level_iterated_from = 0.0
+    state.specifics.reached_last_recorded_value = false
+    return state
+end
+
 function has_next(iter::PercentileIterator, state::HistogramIteratorState{PercentileIteratorState})
     if has_next_base(iter, state)[1]
         return true, state
@@ -215,6 +253,24 @@ HistogramIteratorState(iter::LinearIterator) = HistogramIteratorState(iter,
     LinearIteratorState(iter.value_units_per_bucket,
         lowest_equivalent_value(iter.histogram, iter.value_units_per_bucket)))
 
+function reset_state!(iter::LinearIterator, state::HistogramIteratorState{LinearIteratorState})
+    h = histogram(iter)
+    state.total_count = total_count(h)
+    state.current_index = 0
+    state.current_value_at_index = 0
+    state.next_value_at_index = 1 << unit_magnitude(h)
+    state.previous_value_iterated_to = 0
+    state.total_count_to_previous_index = 0
+    state.total_count_to_current_index = 0
+    state.total_value_to_current_index = 0
+    state.count_at_this_value = 0
+    state.fresh_sub_bucket = true
+    state.specifics.current_step_highest_value_reporting_level = iter.value_units_per_bucket
+    state.specifics.current_step_lowest_value_reporting_level =
+        lowest_equivalent_value(h, iter.value_units_per_bucket)
+    return state
+end
+
 
 function has_next(iter::LinearIterator, state::HistogramIteratorState{LinearIteratorState})
     if has_next_base(iter, state)[1]
@@ -256,6 +312,25 @@ HistogramIteratorState(iter::LogarithmicIterator) = HistogramIteratorState(iter,
     LogarithmicIteratorState(iter.value_units_per_bucket,
         iter.value_units_per_bucket,
         lowest_equivalent_value(iter.histogram, iter.value_units_per_bucket)))
+
+function reset_state!(iter::LogarithmicIterator, state::HistogramIteratorState{LogarithmicIteratorState})
+    h = histogram(iter)
+    state.total_count = total_count(h)
+    state.current_index = 0
+    state.current_value_at_index = 0
+    state.next_value_at_index = 1 << unit_magnitude(h)
+    state.previous_value_iterated_to = 0
+    state.total_count_to_previous_index = 0
+    state.total_count_to_current_index = 0
+    state.total_value_to_current_index = 0
+    state.count_at_this_value = 0
+    state.fresh_sub_bucket = true
+    state.specifics.next_value_reporting_level = iter.value_units_per_bucket
+    state.specifics.current_step_highest_value_reporting_level = iter.value_units_per_bucket
+    state.specifics.current_step_lowest_value_reporting_level =
+        lowest_equivalent_value(h, iter.value_units_per_bucket)
+    return state
+end
 
 function has_next(iter::LogarithmicIterator, state::HistogramIteratorState{LogarithmicIteratorState})
     if has_next_base(iter, state)[1]

@@ -36,6 +36,7 @@ Features unlikely to be implemented:
 * For `SynchronizedHistogram`, keep iterators and multi-step reads inside `lock(h) do ... end` blocks.
 * `ConcurrentHistogram` auto-resize serializes recording; prefer a fixed range for contention-free updates.
 * Iterator iteration values are reused; if you need to retain values, copy the fields you need per step.
+* For allocation-free iteration, use `state = iterator_state(iter)` and `iterate!(iter, state)`.
 * For allocation-free queries and merges, reuse `RecordedValuesIterator` state and pass it to `mean`, `stddev`, `value_at_percentile`, or `add`.
 
 # Simple Tutorial
