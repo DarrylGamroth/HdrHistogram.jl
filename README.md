@@ -38,6 +38,7 @@ Features unlikely to be implemented:
 * Iterator iteration values are reused; if you need to retain values, copy the fields you need per step.
 * For allocation-free iteration, use `state = iterator_state(iter)` and `iterate!(iter, state)`.
 * For allocation-free queries and merges, reuse `RecordedValuesIterator` state and pass it to `mean`, `stddev`, `value_at_percentile`, or `add`.
+* Convenience helpers like `recorded_values_state(h)` or `linear_iterator_state(h, bucket)` return `(iter, state)` pairs.
 
 # Simple Tutorial
 

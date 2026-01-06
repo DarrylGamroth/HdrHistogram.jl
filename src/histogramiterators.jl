@@ -78,6 +78,26 @@ function recorded_values_state(h::AbstractHistogram)
     return iter, iterator_state(iter)
 end
 
+function all_values_state(h::AbstractHistogram)
+    iter = AllValuesIterator(h)
+    return iter, iterator_state(iter)
+end
+
+function linear_iterator_state(h::AbstractHistogram, value_units_per_bucket::Int64)
+    iter = LinearIterator(h, value_units_per_bucket)
+    return iter, iterator_state(iter)
+end
+
+function logarithmic_iterator_state(h::AbstractHistogram, value_units_per_bucket::Int64, log_base::Float64)
+    iter = LogarithmicIterator(h, value_units_per_bucket, log_base)
+    return iter, iterator_state(iter)
+end
+
+function percentile_iterator_state(h::AbstractHistogram, ticks_per_half_distance::Int64)
+    iter = PercentileIterator(h, ticks_per_half_distance)
+    return iter, iterator_state(iter)
+end
+
 function mean(h::AbstractHistogram{C}, iter::RecordedValuesIterator{C}, state::HistogramIteratorState{RecordedValuesIteratorState}) where {C}
     reset_state!(iter, state)
     total = Int128(0)
