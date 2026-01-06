@@ -30,6 +30,15 @@ all_iter = HH.AllValuesIterator(hist)
 linear_iter = HH.LinearIterator(hist, 10_000)
 log_iter = HH.LogarithmicIterator(hist, 10_000, 2.0)
 
+function consume(iter::HH.RecordedValuesIterator)
+    total = 0
+    state = HH.recorded_values_state(iter)
+    while HH.iterate!(iter, state)
+        total += HH.count_added_in_this_iteration_step(state.iter_value)
+    end
+    return total
+end
+
 function consume(iter)
     total = 0
     state = HH.HistogramIteratorState(iter)
@@ -121,7 +130,7 @@ function consume_reset!(iter, state)
     return consume_state(iter, state)
 end
 
-recorded_state = HH.HistogramIteratorState(recorded_iter)
+recorded_state = HH.recorded_values_state(recorded_iter)
 all_state = HH.HistogramIteratorState(all_iter)
 linear_state = HH.HistogramIteratorState(linear_iter)
 log_state = HH.HistogramIteratorState(log_iter)

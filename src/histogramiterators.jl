@@ -40,6 +40,33 @@ HistogramIteratorState(iter::RecordedValuesIterator) = HistogramIteratorState(it
     return has_next_base(iter, state)
 end
 
+function reset_state!(iter::RecordedValuesIterator, state::HistogramIteratorState{RecordedValuesIteratorState})
+    h = histogram(iter)
+    state.total_count = total_count(h)
+    state.current_index = 0
+    state.current_value_at_index = 0
+    state.next_value_at_index = 1 << unit_magnitude(h)
+    state.previous_value_iterated_to = 0
+    state.total_count_to_previous_index = 0
+    state.total_count_to_current_index = 0
+    state.total_value_to_current_index = 0
+    state.count_at_this_value = 0
+    state.fresh_sub_bucket = true
+    state.specifics.visited_index = -1
+    return state
+end
+
+function recorded_values_state(iter::RecordedValuesIterator)
+    tls = task_local_storage()
+    state = get(tls, :hdr_recorded_state, nothing)
+    if state === nothing || !(state isa HistogramIteratorState{RecordedValuesIteratorState})
+        state = HistogramIteratorState(iter)
+        tls[:hdr_recorded_state] = state
+    end
+    reset_state!(iter, state)
+    return state
+end
+
 function increment_iteration_level(iter::RecordedValuesIterator, state::HistogramIteratorState{RecordedValuesIteratorState})
     state.specifics.visited_index = state.current_index
     return state
