@@ -41,3 +41,7 @@ bench("mean (reuse state)", 50_000, HH.mean, hist, iter, state)
 bench("stddev (reuse state)", 50_000, HH.stddev, hist, iter, state)
 bench("p99 (reuse state)", 50_000, HH.value_at_percentile, hist, 99.0, iter, state)
 bench("percentile vector (reuse)", 50_000, HH.value_at_percentile, hist, percentiles, values, iter, state)
+
+target = HH.Histogram(1, 1_000_000, 3)
+bench("add (reuse state)", 50_000, HH.add, target, hist, iter, state)
+bench("add corrected (reuse)", 50_000, HH.add_while_correcting_for_coordinated_omission, target, hist, 1000, iter, state)

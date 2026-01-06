@@ -119,6 +119,24 @@ function value_at_percentile(h::AbstractHistogram, percentiles, values::Abstract
     end
 end
 
+function add(h::AbstractHistogram, from::AbstractHistogram,
+    iter::RecordedValuesIterator, state::HistogramIteratorState{RecordedValuesIteratorState})
+    reset_state!(iter, state)
+    while iterate!(iter, state)
+        i = state.iter_value
+        record_value!(h, value_iterated_to(i), count_at_value_iterated_to(i))
+    end
+end
+
+function add_while_correcting_for_coordinated_omission(h::AbstractHistogram, from::AbstractHistogram, expected_interval::Int64,
+    iter::RecordedValuesIterator, state::HistogramIteratorState{RecordedValuesIteratorState})
+    reset_state!(iter, state)
+    while iterate!(iter, state)
+        i = state.iter_value
+        record_corrected_value!(h, value_iterated_to(i), expected_interval, count_at_value_iterated_to(i))
+    end
+end
+
 function increment_iteration_level(iter::RecordedValuesIterator, state::HistogramIteratorState{RecordedValuesIteratorState})
     state.specifics.visited_index = state.current_index
     return state

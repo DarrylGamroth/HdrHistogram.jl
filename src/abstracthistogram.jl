@@ -299,19 +299,13 @@ end
 function add(h::AbstractHistogram, from::AbstractHistogram)
     iter = RecordedValuesIterator(from)
     state = reset_state!(iter, HistogramIteratorState(iter))
-    while iterate!(iter, state)
-        i = state.iter_value
-        record_value!(h, value_iterated_to(i), count_at_value_iterated_to(i))
-    end
+    return add(h, from, iter, state)
 end
 
 function add_while_correcting_for_coordinated_omission(h::AbstractHistogram, from::AbstractHistogram, expected_interval::Int64)
     iter = RecordedValuesIterator(from)
     state = reset_state!(iter, HistogramIteratorState(iter))
-    while iterate!(iter, state)
-        i = state.iter_value
-        record_corrected_value!(h, value_iterated_to(i), expected_interval, count_at_value_iterated_to(i))
-    end
+    return add_while_correcting_for_coordinated_omission(h, from, expected_interval, iter, state)
 end
 
 #### VALUES ####
