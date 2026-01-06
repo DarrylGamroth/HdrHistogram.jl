@@ -32,13 +32,31 @@ Features unlikely to be implemented:
 * `perf/iterator_alloc.jl` prints allocation counts for recording and iterator passes.
 * `perf/record_bench.jl`, `perf/query_bench.jl`, `perf/iterator_bench.jl`, and `perf/logio_bench.jl` provide quick throughput/alloc benchmarks.
 * On Julia < 1.12, add `Atomix` to use atomic histograms: `import Pkg; Pkg.add("Atomix")`.
-* For zero-allocation iteration, construct iterators (and state) outside hot loops and reuse them.
+* For zero-allocation iteration, construct iterators and reuse iterator state.
 * For `SynchronizedHistogram`, keep iterators and multi-step reads inside `lock(h) do ... end` blocks.
 * `ConcurrentHistogram` auto-resize serializes recording; prefer a fixed range for contention-free updates.
 * Iterator iteration values are reused; if you need to retain values, copy the fields you need per step.
 * For allocation-free iteration, use `state = iterator_state(iter)` and `iterate!(iter, state)`.
 * For allocation-free queries and merges, reuse `RecordedValuesIterator` state and pass it to `mean`, `stddev`, `value_at_percentile`, or `add`.
 * Convenience helpers like `recorded_values_state(h)` or `linear_iterator_state(h, bucket)` return `(iter, state)` pairs.
+
+Example iterator usage:
+
+```Julia
+iter, state = HdrHistogram.recorded_values_state(histogram)
+while HdrHistogram.iterate!(iter, state)
+    v = state.iter_value
+    # use HdrHistogram.value_iterated_to(v), etc.
+end
+```
+
+Example allocation-free queries:
+
+```Julia
+iter, state = HdrHistogram.recorded_values_state(histogram)
+m = HdrHistogram.mean(histogram, iter, state)
+p99 = HdrHistogram.value_at_percentile(histogram, 99.0, iter, state)
+```
 
 # Simple Tutorial
 
