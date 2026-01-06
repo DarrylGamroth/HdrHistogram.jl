@@ -39,6 +39,7 @@ Features unlikely to be implemented:
 * For allocation-free iteration, use `state = iterator_state(iter)` and `iterate!(iter, state)`.
 * For allocation-free queries and merges, reuse `RecordedValuesIterator` state and pass it to `mean`, `stddev`, `value_at_percentile`, or `add`.
 * Convenience helpers like `recorded_values_state(h)` or `linear_iterator_state(h, bucket)` return `(iter, state)` pairs.
+* `percentile_plot` uses Plots.jl when available (optional dependency).
 
 Example iterator usage:
 
@@ -56,6 +57,21 @@ Example allocation-free queries:
 iter, state = HdrHistogram.recorded_values_state(histogram)
 m = HdrHistogram.mean(histogram, iter, state)
 p99 = HdrHistogram.value_at_percentile(histogram, 99.0, iter, state)
+```
+
+Example percentile plot (requires Plots.jl):
+
+```Julia
+using HdrHistogram
+using Plots
+
+h = HdrHistogram.Histogram(1, 1000, 2)
+for v in 1:100
+    HdrHistogram.record_value!(h, v)
+end
+
+plt = HdrHistogram.percentile_plot(h; ticks_per_half_distance=5, value_scale=1.0)
+display(plt)
 ```
 
 # Simple Tutorial
