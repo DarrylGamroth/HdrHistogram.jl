@@ -2,7 +2,7 @@
 
 julia_version = "1.12.3"
 manifest_format = "2.0"
-project_hash = "d6edf3af2c84c79a8ead81759a92482769b7a233"
+project_hash = "1748d9e06fd14dfb996813b33e29674a32503977"
 
 [[deps.Base64]]
 uuid = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
@@ -15,10 +15,13 @@ uuid = "944b1d66-785c-5afd-91f1-9de20f533193"
 version = "0.7.8"
 
 [[deps.HdrHistogram]]
-deps = ["Base64", "CodecZlib", "Printf", "Requires"]
+deps = ["Base64", "CodecZlib", "Printf"]
 path = "."
 uuid = "d0b8ac25-3072-4075-acf5-4a93ba78f71f"
 version = "0.3.2"
+
+    [deps.HdrHistogram.extensions]
+    HdrHistogramPlotsExt = "Plots"
 
     [deps.HdrHistogram.weakdeps]
     Atomix = "a9b6321e-bd34-4604-b9c9-b65b8de01458"
@@ -33,30 +36,10 @@ deps = ["Unicode"]
 uuid = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 version = "1.11.0"
 
-[[deps.Random]]
-deps = ["SHA"]
-uuid = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
-version = "1.11.0"
-
-[[deps.Requires]]
-deps = ["UUIDs"]
-git-tree-sha1 = "62389eeff14780bfe55195b7204c0d8738436d64"
-uuid = "ae029012-a4dd-5104-9daa-d747884805df"
-version = "1.3.1"
-
-[[deps.SHA]]
-uuid = "ea8e919c-243c-51af-8825-aaa63cd721ce"
-version = "0.7.0"
-
 [[deps.TranscodingStreams]]
 git-tree-sha1 = "0c45878dcfdcfa8480052b6ab162cdd138781742"
 uuid = "3bb67fe8-82b1-5028-8e26-92a6c54297fa"
 version = "0.11.3"
-
-[[deps.UUIDs]]
-deps = ["Random", "SHA"]
-uuid = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
-version = "1.11.0"
 
 [[deps.Unicode]]
 uuid = "4ec0a83e-493e-50e2-b9ac-8f72acf5a8f5"
