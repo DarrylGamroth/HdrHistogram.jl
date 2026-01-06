@@ -34,3 +34,10 @@ values = zeros(Int64, length(percentiles))
 bench("percentile vector", 50_000, HH.value_at_percentile, hist, percentiles, values)
 
 bench("count_at_value", 200_000, HH.count_at_value, hist, 1234)
+
+iter = HH.RecordedValuesIterator(hist)
+state = HH.recorded_values_state(iter)
+bench("mean (reuse state)", 50_000, HH.mean, hist, iter, state)
+bench("stddev (reuse state)", 50_000, HH.stddev, hist, iter, state)
+bench("p99 (reuse state)", 50_000, HH.value_at_percentile, hist, 99.0, iter, state)
+bench("percentile vector (reuse)", 50_000, HH.value_at_percentile, hist, percentiles, values, iter, state)

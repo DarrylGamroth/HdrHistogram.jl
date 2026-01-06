@@ -56,15 +56,67 @@ function reset_state!(iter::RecordedValuesIterator, state::HistogramIteratorStat
     return state
 end
 
-function recorded_values_state(iter::RecordedValuesIterator)
-    tls = task_local_storage()
-    state = get(tls, :hdr_recorded_state, nothing)
-    if state === nothing || !(state isa HistogramIteratorState{RecordedValuesIteratorState})
-        state = HistogramIteratorState(iter)
-        tls[:hdr_recorded_state] = state
-    end
+recorded_values_state(iter::RecordedValuesIterator) = HistogramIteratorState(iter)
+
+function mean(h::AbstractHistogram{C}, iter::RecordedValuesIterator{C}, state::HistogramIteratorState{RecordedValuesIteratorState}) where {C}
     reset_state!(iter, state)
-    return state
+    total = Int128(0)
+    count_total = total_count(h)
+    if count_total == zero(C)
+        return 0.0
+    end
+    while iterate!(iter, state)
+        i = state.iter_value
+        total += count_at_value_iterated_to(i) * median_equivalent_value(h, value_iterated_to(i))
+    end
+    return total / count_total
+end
+
+function stddev(h::AbstractHistogram{C}, iter::RecordedValuesIterator{C}, state::HistogramIteratorState{RecordedValuesIteratorState}) where {C}
+    reset_state!(iter, state)
+    count_total = total_count(h)
+    if count_total == zero(C)
+        return 0.0
+    end
+    m = mean(h, iter, state)
+    reset_state!(iter, state)
+    geometric_dev_total = 0.0
+    while iterate!(iter, state)
+        i = state.iter_value
+        dev = median_equivalent_value(h, value_iterated_to(i)) - m
+        geometric_dev_total += dev^2 * count_at_value_iterated_to(i)
+    end
+    return sqrt(geometric_dev_total / count_total)
+end
+
+function value_at_percentile(h::AbstractHistogram, percentile::Real, iter::RecordedValuesIterator, state::HistogramIteratorState{RecordedValuesIteratorState})
+    count = count_at_percentile(h, percentile)
+    reset_state!(iter, state)
+    while iterate!(iter, state)
+        i = state.iter_value
+        if total_count_to_this_value(i) >= count
+            return percentile == zero(typeof(percentile)) ?
+                   lowest_equivalent_value(h, value_iterated_to(i)) : highest_equivalent_value(h, value_iterated_to(i))
+        end
+    end
+    return 0
+end
+
+function value_at_percentile(h::AbstractHistogram, percentiles, values::AbstractVector{<:Number},
+    iter::RecordedValuesIterator, state::HistogramIteratorState{RecordedValuesIteratorState})
+    reset_state!(iter, state)
+    at_pos = 1
+    while iterate!(iter, state)
+        if at_pos > length(percentiles)
+            break
+        end
+        i = state.iter_value
+        while at_pos <= length(percentiles) && total_count_to_this_value(i) >= values[at_pos]
+            values[at_pos] = percentiles[at_pos] == zero(eltype(percentiles)) ?
+                             lowest_equivalent_value(h, value_iterated_to(i)) : highest_equivalent_value(h, value_iterated_to(i))
+            at_pos += 1
+        end
+    end
 end
 
 function increment_iteration_level(iter::RecordedValuesIterator, state::HistogramIteratorState{RecordedValuesIteratorState})
