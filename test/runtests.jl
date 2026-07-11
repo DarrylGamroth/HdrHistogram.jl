@@ -37,7 +37,7 @@ end
 
 @testset "Empty" begin
     h = HdrHistogram.Histogram(Int64, LOWEST, HIGHEST, SIGNIFICANT)
-    @test min(h) == typemax(Int64)
+    @test min(h) == 0
     @test max(h) == 0
     @test HdrHistogram.mean(h) == 0
     @test HdrHistogram.stddev(h) == 0
@@ -45,7 +45,8 @@ end
 
 @testset "Min Tracking Count Type" begin
     h = HdrHistogram.Histogram(Int8, 1, 1000, 2)
-    @test min(h) == typemax(Int64)
+    @test min(h) == 0
+    @test HdrHistogram.min_value(h) == typemax(Int64)
     HdrHistogram.record_value!(h, 300)
     @test HdrHistogram.min_value(h) == 300
 end
@@ -117,6 +118,8 @@ end
     HdrHistogram.record_value!(h, 2)
     HdrHistogram.record_value!(h, 2)
     @test HdrHistogram.value_at_percentile(h, 30.0) == 2
+    @test HdrHistogram.value_at_percentile(h, Inf) == 2
+    @test HdrHistogram.value_at_percentile(h, NaN) == 1
 end
 
 @testset "Mean and Standard Deviation" begin
@@ -183,6 +186,67 @@ end
     @test_throws ArgumentError HdrHistogram.record_value!(h, 32768)
 end
 
+@testset "Checked Count Access" begin
+    for h in (
+        HdrHistogram.Histogram(1, 1000, 2),
+        HdrHistogram.AtomicHistogram(1, 1000, 2),
+        HdrHistogram.ConcurrentHistogram(1, 1000, 2),
+    )
+        HdrHistogram.record_value!(h, 10)
+        last_index = HdrHistogram.counts_length(h) - 1
+        @test HdrHistogram.count_at_index(h, Int64(last_index)) >= 0
+        @test_throws BoundsError HdrHistogram.count_at_index(h, Int64(last_index + 1))
+        @test_throws BoundsError HdrHistogram.counts_get_direct(h, last_index + 1)
+        @test HdrHistogram.count_at_value(h, typemax(Int64)) ==
+              HdrHistogram.count_at_index(h, Int64(last_index))
+    end
+end
+
+@testset "Bulk Recording" begin
+    h = HdrHistogram.Histogram(1, 1000, 2)
+    @test push!(h, 10) === h
+    @test append!(h, [10, 20, 30]) === h
+    @test HdrHistogram.record_values!(h, (40, 50), 2) === h
+    @test HdrHistogram.total_count(h) == 8
+    @test HdrHistogram.count_at_value(h, 10) == 2
+    @test HdrHistogram.count_at_value(h, 40) == 2
+
+    recorder = HdrHistogram.Recorder(1, 1000, 2)
+    @test append!(recorder, 1:10) === recorder
+    @test HdrHistogram.total_count(HdrHistogram.interval_histogram(recorder)) == 10
+end
+
+@testset "Java-compatible Addition" begin
+    source = HdrHistogram.Histogram(1, 1_000_000, 2)
+    HdrHistogram.record_value!(source, 100_000)
+    source_index = HdrHistogram.counts_index_for(source, 100_000)
+    source_low = HdrHistogram.value_at_index(source, source_index)
+    source_high = HdrHistogram.highest_equivalent_value(source, source_low)
+
+    target = HdrHistogram.Histogram(1, 1_000_000, 3)
+    HdrHistogram.start_time_stamp!(source, 100)
+    HdrHistogram.end_time_stamp!(source, 400)
+    HdrHistogram.start_time_stamp!(target, 200)
+    HdrHistogram.end_time_stamp!(target, 300)
+    @test HdrHistogram.add!(target, source) === target
+    @test HdrHistogram.count_at_value(target, source_low) == 1
+    @test HdrHistogram.count_at_value(target, source_high) == 0
+    @test HdrHistogram.start_time_stamp(target) == 100
+    @test HdrHistogram.end_time_stamp(target) == 400
+
+    direct = HdrHistogram.Histogram(1, 1000, 2)
+    append!(direct, [10, 20, 20])
+    HdrHistogram.add(direct, direct)
+    @test HdrHistogram.total_count(direct) == 6
+    @test HdrHistogram.count_at_value(direct, 20) == 4
+
+    too_small = HdrHistogram.Histogram(1, 1000, 2)
+    too_large = HdrHistogram.Histogram(1, 1_000_000, 2)
+    append!(too_large, [10, 1_000_000])
+    @test_throws ArgumentError HdrHistogram.add(too_small, too_large)
+    @test HdrHistogram.total_count(too_small) == 0
+end
+
 @testset "Auto Resize" begin
     h = HdrHistogram.Histogram(3)
     HdrHistogram.record_value!(h, 1)
@@ -200,6 +264,9 @@ end
     @test HdrHistogram.total_count(h) == 3
     @test HdrHistogram.min_value(h) == 10
     @test HdrHistogram.max_value(h) == 20
+
+    typed = HdrHistogram.AtomicHistogram(Int64, Int32(1), Int32(1000), Int32(2))
+    @test HdrHistogram.counts_length(typed) == HdrHistogram.counts_length(h)
 end
 
 @testset "Concurrent Histogram" begin
@@ -217,6 +284,20 @@ end
     HdrHistogram.record_value!(auto, 10_000_000)
     @test HdrHistogram.total_count(auto) == 2
     @test HdrHistogram.highest_trackable_value(auto) >= 10_000_000
+
+    stressed = HdrHistogram.ConcurrentHistogram(2)
+    writers = max(2, Threads.nthreads())
+    tasks = [Threads.@spawn begin
+        for i in 1:2000
+            value = (1, 1000, 100_000, 10_000_000)[mod1(i + writer, 4)]
+            HdrHistogram.record_value!(stressed, value)
+        end
+    end for writer in 1:writers]
+    foreach(fetch, tasks)
+    expected_total = 2000 * writers
+    @test HdrHistogram.total_count(stressed) == expected_total
+    @test sum(HdrHistogram.count_at_index(stressed, Int64(i))
+        for i in 0:HdrHistogram.counts_length(stressed)-1) == expected_total
 end
 
 @testset "Synchronized Histogram" begin
@@ -232,6 +313,18 @@ end
     lock(h) do
         @test HdrHistogram.count_at_value(h, 20) == 2
     end
+
+    left = HdrHistogram.SynchronizedHistogram(1, 1000, 2)
+    right = HdrHistogram.SynchronizedHistogram(1, 1000, 2)
+    HdrHistogram.record_value!(left, 10)
+    HdrHistogram.record_value!(right, 20)
+    additions = (
+        Threads.@spawn(HdrHistogram.add(left, right)),
+        Threads.@spawn(HdrHistogram.add(right, left)),
+    )
+    foreach(fetch, additions)
+    @test HdrHistogram.total_count(left) >= 2
+    @test HdrHistogram.total_count(right) >= 2
 end
 
 @testset "Interval Recorder" begin
@@ -261,6 +354,12 @@ end
     interval2 = HdrHistogram.interval_histogram(r, interval)
     @test HdrHistogram.total_count(interval2) == 2
     @test HdrHistogram.count_at_value(interval2, 10) == 2
+
+    serialized = HdrHistogram.Recorder(HdrHistogram.Histogram(1, 1000, 2))
+    writers = [Threads.@spawn(append!(serialized, fill(10, 1000))) for _ in 1:max(2, Threads.nthreads())]
+    foreach(fetch, writers)
+    @test HdrHistogram.total_count(HdrHistogram.interval_histogram(serialized)) ==
+          1000 * max(2, Threads.nthreads())
 end
 
 @testset "SingleWriterRecorder" begin
@@ -298,6 +397,38 @@ end
     @test HdrHistogram.total_count(decoded) == HdrHistogram.total_count(h)
     @test min(decoded) == min(h)
     @test max(decoded) == max(h)
+end
+
+@testset "Encoding Workspace and Decoder Bounds" begin
+    h = HdrHistogram._init_with_config(
+        HdrHistogram.Histogram{Int64}, 1, 1000, 2, false, 1.0, 17)
+    append!(h, [0, 1, 10, 100, 1000])
+    workspace = HdrHistogram.EncodingWorkspace()
+    encoded = HdrHistogram.encode_into_compressed_byte_buffer!(workspace, h)
+    decoded = HdrHistogram.decode_from_compressed_byte_buffer(encoded)
+    @test HdrHistogram.normalizing_index_offset(decoded) == 17
+    @test [HdrHistogram.count_at_value(decoded, Int64(v)) for v in (0, 1, 10, 100, 1000)] == ones(Int, 5)
+    @test HdrHistogram.encode_into_compressed_byte_buffer!(workspace, h) === encoded
+
+    valid = HdrHistogram.encode_into_byte_buffer(HdrHistogram.Histogram(1, 1000, 2))
+
+    zero_writer = HdrHistogram.BufferWriter(16)
+    HdrHistogram.zigzag_put_long!(zero_writer, -10_000)
+    oversized_zero_run = HdrHistogram.finish!(zero_writer)
+    malformed = vcat(valid[1:HdrHistogram.ENCODING_HEADER_SIZE], oversized_zero_run)
+    malformed_writer = HdrHistogram.BufferWriter(malformed, 1)
+    HdrHistogram.write_at_be_i32!(malformed_writer, 5, Int32(length(oversized_zero_run)))
+    @test_throws ArgumentError HdrHistogram.decode_from_byte_buffer(malformed)
+
+    truncated = vcat(valid[1:HdrHistogram.ENCODING_HEADER_SIZE], UInt8[0x80])
+    truncated_writer = HdrHistogram.BufferWriter(truncated, 1)
+    HdrHistogram.write_at_be_i32!(truncated_writer, 5, Int32(1))
+    @test_throws ArgumentError HdrHistogram.decode_from_byte_buffer(truncated)
+
+    invalid_offset = HdrHistogram.encode_into_byte_buffer(h)
+    invalid_offset_writer = HdrHistogram.BufferWriter(invalid_offset, 1)
+    HdrHistogram.write_at_be_i32!(invalid_offset_writer, 9, typemax(Int32))
+    @test_throws ArgumentError HdrHistogram.decode_from_byte_buffer(invalid_offset)
 end
 
 @testset "Log Reader Writer Roundtrip" begin
@@ -457,9 +588,10 @@ end
 
 @testset "Percentile Output Type" begin
     h = HdrHistogram.Histogram(Int8, 1, 1000, 2)
-    HdrHistogram.record_value!(h, 10)
+    append!(h, mod1.(1:200, 100))
     values = HdrHistogram.value_at_percentile(h, [50.0, 100.0])
     @test eltype(values) == Int64
+    @test HdrHistogram.count_at_percentile(h, 99.0) > typemax(Int8)
 end
 
 @testset "No Alloc Record Value" begin
@@ -487,6 +619,31 @@ end
     @test @allocated(HdrHistogram.record_value!(single, 10)) == 0
 end
 
+@testset "No Alloc Direct Queries and Merge" begin
+    h = HdrHistogram.Histogram(1, 1_000_000, 3)
+    append!(h, 1:10_000)
+    values = zeros(Int64, 3)
+    percentiles = [50.0, 90.0, 99.0]
+    HdrHistogram.mean(h)
+    HdrHistogram.stddev(h)
+    HdrHistogram.value_at_percentile(h, 99.0)
+    HdrHistogram.value_at_percentile(h, percentiles, values)
+
+    @test @allocated(HdrHistogram.mean(h)) == 0
+    @test @allocated(HdrHistogram.stddev(h)) == 0
+    @test @allocated(HdrHistogram.value_at_percentile(h, 99.0)) == 0
+    @test @allocated(HdrHistogram.value_at_percentile(h, percentiles, values)) == 0
+
+    target = similar(h)
+    HdrHistogram.add!(target, h)
+    HdrHistogram.reset!(target)
+    @test @allocated(HdrHistogram.add!(target, h)) == 0
+
+    writer = HdrHistogram.BufferWriter(0)
+    HdrHistogram.encode_into_byte_buffer!(writer, h)
+    @test @allocated(HdrHistogram.encode_into_byte_buffer!(writer, h)) == 0
+end
+
 @testset "No Alloc Iterator" begin
     h = HdrHistogram.Histogram(1, 1000, 2)
     for v in 1:10
@@ -504,6 +661,26 @@ end
     iter_recorded_state(iter, state)
     alloc = @allocated iter_recorded_state(iter, state)
     @test alloc == 0
+
+    function consume_iterator(iter)
+        total = 0
+        for item in iter
+            total += HdrHistogram.count_added_in_this_iteration_step(item)
+        end
+        return total
+    end
+
+    recorded = HdrHistogram.RecordedValuesIterator(h)
+    all_values = HdrHistogram.AllValuesIterator(h)
+    percentiles = HdrHistogram.PercentileIterator(h, 5)
+    linear = HdrHistogram.LinearIterator(h, 10)
+    logarithmic = HdrHistogram.LogarithmicIterator(h, 10, 2.0)
+    foreach(consume_iterator, (recorded, all_values, percentiles, linear, logarithmic))
+    @test @allocated(consume_iterator(recorded)) == 0
+    @test @allocated(consume_iterator(all_values)) == 0
+    @test @allocated(consume_iterator(percentiles)) == 0
+    @test @allocated(consume_iterator(linear)) == 0
+    @test @allocated(consume_iterator(logarithmic)) == 0
 end
 
 @testset "Recorded Values Iterator Zero" begin
@@ -585,6 +762,7 @@ end
     for i in HdrHistogram.LinearIterator(h, 100_000)
         count_added_in_this_iteration = HdrHistogram.count_added_in_this_iteration_step(i)
         if index == 0
+            @test HdrHistogram.value_iterated_to(i) == 99_999
             @test count_added_in_this_iteration == 10000
         elseif index == 999
             @test count_added_in_this_iteration == 1
@@ -601,10 +779,10 @@ end
     for i in HdrHistogram.LinearIterator(h, 10_000)
         count_added_in_this_iteration = HdrHistogram.count_added_in_this_iteration_step(i)
         if index == 0
-            # first bucket is range [0, 10000]
+            # Java-compatible first bucket is range [0, 9999].
             # value 1000  count = 10000
-            # value 10000 count = 1 (corrected from the 100M value with 10K interval)
-            @test count_added_in_this_iteration == 10_001
+            @test HdrHistogram.value_iterated_to(i) == 9_999
+            @test count_added_in_this_iteration == 10_000
         end
         total_added_count += count_added_in_this_iteration
         index += 1
@@ -619,6 +797,7 @@ end
     for i in HdrHistogram.LogarithmicIterator(h, 10_000, 2.0)
         count_added_in_this_iteration = HdrHistogram.count_added_in_this_iteration_step(i)
         if index == 0
+            @test HdrHistogram.value_iterated_to(i) == 9_999
             @test count_added_in_this_iteration == 10000
         elseif index == 14
             @test count_added_in_this_iteration == 1
@@ -635,10 +814,10 @@ end
     for i in HdrHistogram.LogarithmicIterator(h, 10_000, 2.0)
         count_added_in_this_iteration = HdrHistogram.count_added_in_this_iteration_step(i)
         if index == 0
-            # first bucket is range [0, 10000]
+            # Java-compatible first bucket is range [0, 9999].
             # value 1000  count = 10000
-            # value 10000 count = 1 (corrected from the 100M value with 10K interval)
-            @test count_added_in_this_iteration == 10_001
+            @test HdrHistogram.value_iterated_to(i) == 9_999
+            @test count_added_in_this_iteration == 10_000
         end
         total_added_count += count_added_in_this_iteration
         index += 1

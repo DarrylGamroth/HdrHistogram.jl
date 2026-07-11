@@ -100,8 +100,9 @@ Constructs a new histogram with the specified configuration.
 - `significant_figures`: The number of significant decimal digits to which the histogram will maintain value resolution and separation.
 
 """
-function AtomicHistogram(C::Type{<:Signed}, lowest_discernible_value::Int64, highest_trackable_value::Int64, significant_figures::Int32)
-    return _init(AtomicHistogram{C}, lowest_discernible_value, highest_trackable_value, significant_figures, false)
+function AtomicHistogram(C::Type{<:Signed}, lowest_discernible_value, highest_trackable_value, significant_figures)
+    return _init(AtomicHistogram{C}, Int64(lowest_discernible_value), Int64(highest_trackable_value),
+        Int64(significant_figures), false)
 end
 
 """
@@ -116,27 +117,35 @@ Constructs a new histogram with the specified configuration.
 
 """
 function AtomicHistogram(lowest_discernible_value, highest_trackable_value, significant_figures)
-    return _init(AtomicHistogram{Int64}, lowest_discernible_value, highest_trackable_value, significant_figures, false)
+    return _init(AtomicHistogram{Int64}, Int64(lowest_discernible_value), Int64(highest_trackable_value),
+        Int64(significant_figures), false)
 end
 
-@inline function counts_get_direct(h::AtomicHistogram, index)
+Base.@propagate_inbounds @inline function counts_get_direct(h::AtomicHistogram, index)
     i = index + 1
+    @boundscheck checkbounds(h.counts, i)
     return @inbounds @atomic h.counts[i]
 end
 
-@inline function counts_inc_direct!(h::AtomicHistogram, index, value)
+Base.@propagate_inbounds @inline function counts_inc_direct!(h::AtomicHistogram, index, value)
     i = index + 1
+    @boundscheck checkbounds(h.counts, i)
     return @inbounds @atomic h.counts[i] += value
 end
 
-@inline function counts_set_direct!(h::AtomicHistogram, index, value)
+Base.@propagate_inbounds @inline function counts_set_direct!(h::AtomicHistogram, index, value)
     i = index + 1
+    @boundscheck checkbounds(h.counts, i)
     @inbounds @atomic h.counts[i] = value
 end
 
 @inline function update_min_max!(h::AtomicHistogram, value)
-    @atomic h.min_value min value
-    @atomic h.max_value max value
+    if value != 0 && value < (@atomic h.min_value)
+        @atomic h.min_value min value
+    end
+    if value > (@atomic h.max_value)
+        @atomic h.max_value max value
+    end
 end
 
 @static if VERSION < v"1.12"
@@ -144,6 +153,9 @@ end
         total_count!(h, 0)
         min_value!(h, typemax(Int64))
         max_value!(h, 0)
+        start_time_stamp!(h, typemax(Int64))
+        end_time_stamp!(h, 0)
+        tag!(h, nothing)
         fill!(counts(h), zero(C))
     end
 else
@@ -151,6 +163,9 @@ else
         total_count!(h, 0)
         min_value!(h, typemax(Int64))
         max_value!(h, 0)
+        start_time_stamp!(h, typemax(Int64))
+        end_time_stamp!(h, 0)
+        tag!(h, nothing)
         for i in 1:counts_length(h)
             @atomic h.counts[i] = zero(C)
         end

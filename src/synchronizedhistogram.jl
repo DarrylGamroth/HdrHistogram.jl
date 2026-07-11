@@ -1,6 +1,11 @@
+const _SYNCHRONIZED_HISTOGRAM_ID = Threads.Atomic{UInt64}(0)
+
+@inline _next_synchronized_histogram_id() = Threads.atomic_add!(_SYNCHRONIZED_HISTOGRAM_ID, UInt64(1))
+
 mutable struct SynchronizedHistogram{C} <: AbstractHistogram{C}
-    inner::Histogram{C}
+    const inner::Histogram{C}
     const lock::ReentrantLock
+    const identity::UInt64
 end
 
 """
@@ -10,7 +15,7 @@ Constructs a new synchronized histogram with the specified configuration.
 """
 function SynchronizedHistogram(C::Type{<:Signed}, lowest_discernible_value, highest_trackable_value, significant_figures)
     inner = Histogram(C, lowest_discernible_value, highest_trackable_value, significant_figures)
-    return SynchronizedHistogram{C}(inner, ReentrantLock())
+    return SynchronizedHistogram{C}(inner, ReentrantLock(), _next_synchronized_histogram_id())
 end
 
 """
@@ -20,7 +25,7 @@ Constructs a new synchronized histogram with the specified configuration.
 """
 function SynchronizedHistogram(lowest_discernible_value, highest_trackable_value, significant_figures)
     inner = Histogram(lowest_discernible_value, highest_trackable_value, significant_figures)
-    return SynchronizedHistogram{Int64}(inner, ReentrantLock())
+    return SynchronizedHistogram{Int64}(inner, ReentrantLock(), _next_synchronized_histogram_id())
 end
 
 """
@@ -31,7 +36,7 @@ highestTrackableValue. Can auto-resize up to track values up to (typemax(Int64) 
 """
 function SynchronizedHistogram(significant_figures)
     inner = Histogram(significant_figures)
-    return SynchronizedHistogram{Int64}(inner, ReentrantLock())
+    return SynchronizedHistogram{Int64}(inner, ReentrantLock(), _next_synchronized_histogram_id())
 end
 
 function _init_with_config(::Type{SynchronizedHistogram{C}},
@@ -43,7 +48,7 @@ function _init_with_config(::Type{SynchronizedHistogram{C}},
     normalizing_index_offset::Int64) where {C}
     inner = _init_with_config(Histogram{C}, lowest_discernible_value, highest_trackable_value,
         significant_figures, auto_resize, conversion_ratio, normalizing_index_offset)
-    return SynchronizedHistogram{C}(inner, ReentrantLock())
+    return SynchronizedHistogram{C}(inner, ReentrantLock(), _next_synchronized_histogram_id())
 end
 
 Base.lock(h::SynchronizedHistogram) = lock(h.lock)
@@ -86,7 +91,6 @@ total_count(h::SynchronizedHistogram) = total_count(h.inner)
 total_count!(h::SynchronizedHistogram, value) = total_count!(h.inner, value)
 total_count_inc!(h::SynchronizedHistogram, value) = total_count_inc!(h.inner, value)
 counts(h::SynchronizedHistogram) = counts(h.inner)
-counts!(h::SynchronizedHistogram, value) = counts!(h.inner, value)
 counts_length(h::SynchronizedHistogram) = counts_length(h.inner)
 
 @inline function record_value!(h::SynchronizedHistogram, value::Int64, count::Int64=1)
@@ -116,10 +120,73 @@ function add(h::SynchronizedHistogram, from::AbstractHistogram)
     end
 end
 
+function add(h::SynchronizedHistogram, from::SynchronizedHistogram)
+    if h === from
+        lock(h.lock)
+        try
+            return add(h.inner, from.inner)
+        finally
+            unlock(h.lock)
+        end
+    end
+
+    first, second = h.identity < from.identity ? (h, from) : (from, h)
+    lock(first.lock)
+    lock(second.lock)
+    try
+        return add(h.inner, from.inner)
+    finally
+        unlock(second.lock)
+        unlock(first.lock)
+    end
+end
+
 function add_while_correcting_for_coordinated_omission(h::SynchronizedHistogram, from::AbstractHistogram, expected_interval::Int64)
     lock(h.lock)
     try
         return add_while_correcting_for_coordinated_omission(h.inner, from, expected_interval)
+    finally
+        unlock(h.lock)
+    end
+end
+
+function add_while_correcting_for_coordinated_omission(h::SynchronizedHistogram,
+    from::SynchronizedHistogram, expected_interval::Int64)
+    if h === from
+        lock(h.lock)
+        try
+            return add_while_correcting_for_coordinated_omission(h.inner, from.inner, expected_interval)
+        finally
+            unlock(h.lock)
+        end
+    end
+
+    first, second = h.identity < from.identity ? (h, from) : (from, h)
+    lock(first.lock)
+    lock(second.lock)
+    try
+        return add_while_correcting_for_coordinated_omission(h.inner, from.inner, expected_interval)
+    finally
+        unlock(second.lock)
+        unlock(first.lock)
+    end
+end
+
+function record_values!(h::SynchronizedHistogram, values)
+    lock(h.lock)
+    try
+        record_values!(h.inner, values)
+        return h
+    finally
+        unlock(h.lock)
+    end
+end
+
+function record_values!(h::SynchronizedHistogram, values, count::Integer)
+    lock(h.lock)
+    try
+        record_values!(h.inner, values, count)
+        return h
     finally
         unlock(h.lock)
     end

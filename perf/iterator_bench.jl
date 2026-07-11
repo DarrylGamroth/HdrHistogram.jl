@@ -1,24 +1,9 @@
+pushfirst!(LOAD_PATH, dirname(@__DIR__))
 using HdrHistogram
+using BenchmarkTools
 
 const HH = HdrHistogram
-
-function bench(label, n, f, args...)
-    GC.gc()
-    f(args...)
-    GC.gc()
-    t0 = time_ns()
-    for _ in 1:n
-        f(args...)
-    end
-    elapsed = (time_ns() - t0)
-    ns_per = elapsed / n
-    rate = 1e9 / ns_per
-    alloc = @allocated f(args...)
-    println(rpad(label, 28),
-        "ops/sec=", round(rate, digits=1),
-        " ns/op=", round(ns_per, digits=1),
-        " alloc=", alloc)
-end
+include(joinpath(@__DIR__, "benchutils.jl"))
 
 hist = HH.Histogram(1, 1_000_000, 3)
 for i in 1:200_000
@@ -92,9 +77,9 @@ function reset_state!(iter::HH.LinearIterator, state)
     state.total_value_to_current_index = 0
     state.count_at_this_value = 0
     state.fresh_sub_bucket = true
-    state.specifics.current_step_highest_value_reporting_level = iter.value_units_per_bucket
+    state.specifics.current_step_highest_value_reporting_level = iter.value_units_per_bucket - 1
     state.specifics.current_step_lowest_value_reporting_level =
-        HH.lowest_equivalent_value(h, iter.value_units_per_bucket)
+        HH.lowest_equivalent_value(h, iter.value_units_per_bucket - 1)
     return state
 end
 
@@ -111,9 +96,9 @@ function reset_state!(iter::HH.LogarithmicIterator, state)
     state.count_at_this_value = 0
     state.fresh_sub_bucket = true
     state.specifics.next_value_reporting_level = iter.value_units_per_bucket
-    state.specifics.current_step_highest_value_reporting_level = iter.value_units_per_bucket
+    state.specifics.current_step_highest_value_reporting_level = iter.value_units_per_bucket - 1
     state.specifics.current_step_lowest_value_reporting_level =
-        HH.lowest_equivalent_value(h, iter.value_units_per_bucket)
+        HH.lowest_equivalent_value(h, iter.value_units_per_bucket - 1)
     return state
 end
 
@@ -135,11 +120,11 @@ all_state = HH.HistogramIteratorState(all_iter)
 linear_state = HH.HistogramIteratorState(linear_iter)
 log_state = HH.HistogramIteratorState(log_iter)
 
-bench("recorded iterator", 200, consume, recorded_iter)
-bench("recorded iterator (reuse)", 200, consume_reset!, recorded_iter, recorded_state)
-bench("all values iterator", 50, consume, all_iter)
-bench("all values iterator (reuse)", 50, consume_reset!, all_iter, all_state)
-bench("linear iterator", 200, consume, linear_iter)
-bench("linear iterator (reuse)", 200, consume_reset!, linear_iter, linear_state)
-bench("log iterator", 500, consume, log_iter)
-bench("log iterator (reuse)", 500, consume_reset!, log_iter, log_state)
+report_benchmark("recorded iterator", @benchmark(consume($recorded_iter)))
+report_benchmark("recorded iterator (cursor)", @benchmark(consume_reset!($recorded_iter, $recorded_state)))
+report_benchmark("all values iterator", @benchmark(consume($all_iter)))
+report_benchmark("all values iterator (cursor)", @benchmark(consume_reset!($all_iter, $all_state)))
+report_benchmark("linear iterator", @benchmark(consume($linear_iter)))
+report_benchmark("linear iterator (cursor)", @benchmark(consume_reset!($linear_iter, $linear_state)))
+report_benchmark("log iterator", @benchmark(consume($log_iter)))
+report_benchmark("log iterator (cursor)", @benchmark(consume_reset!($log_iter, $log_state)))

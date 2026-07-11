@@ -1,38 +1,33 @@
+pushfirst!(LOAD_PATH, dirname(@__DIR__))
 using HdrHistogram
+using BenchmarkTools
 
 const HH = HdrHistogram
+include(joinpath(@__DIR__, "benchutils.jl"))
 
-function bench_record!(label, n, f, args...)
-    GC.gc()
-    f(args...)
-    GC.gc()
-    t0 = time_ns()
-    for _ in 1:n
-        f(args...)
-    end
-    elapsed = (time_ns() - t0)
-    ns_per = elapsed / n
-    rate = 1e9 / ns_per
-    alloc = @allocated f(args...)
-    println(rpad(label, 24),
-        "ops/sec=", round(rate, digits=1),
-        " ns/op=", round(ns_per, digits=1),
-        " alloc=", alloc)
-end
-
-const N = 1_000_000
+values = Int64[mod(i * 7919, 900) + 1 for i in 1:4096]
 
 hist = HH.Histogram(1, 1000, 2)
-bench_record!("Histogram record", N, HH.record_value!, hist, 10)
+report_benchmark("Histogram record batch",
+    @benchmark(HH.record_values!($hist, $values), evals=1), operations=length(values))
 
 atomic = HH.AtomicHistogram(1, 1000, 2)
-bench_record!("Atomic record", N, HH.record_value!, atomic, 10)
+report_benchmark("Atomic record batch",
+    @benchmark(HH.record_values!($atomic, $values), evals=1), operations=length(values))
 
 concurrent = HH.ConcurrentHistogram(1, 1000, 2)
-bench_record!("Concurrent record", N, HH.record_value!, concurrent, 10)
+report_benchmark("Concurrent record batch",
+    @benchmark(HH.record_values!($concurrent, $values), evals=1), operations=length(values))
+
+auto_concurrent = HH.ConcurrentHistogram(2)
+HH.record_value!(auto_concurrent, 1000)
+report_benchmark("Auto concurrent record batch",
+    @benchmark(HH.record_values!($auto_concurrent, $values), evals=1), operations=length(values))
 
 recorder = HH.Recorder(HH.ConcurrentHistogram(1, 1000, 2))
-bench_record!("Recorder record", N, HH.record_value!, recorder, 10)
+report_benchmark("Recorder record batch",
+    @benchmark(HH.record_values!($recorder, $values), evals=1), operations=length(values))
 
 single = HH.SingleWriterRecorder(HH.Histogram(1, 1000, 2))
-bench_record!("SingleWriter record", N, HH.record_value!, single, 10)
+report_benchmark("SingleWriter record batch",
+    @benchmark(HH.record_values!($single, $values), evals=1), operations=length(values))

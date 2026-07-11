@@ -24,6 +24,17 @@ end
 
 BufferWriter(capacity::Int) = BufferWriter(Vector{UInt8}(undef, capacity), 1)
 
+@inline function prepare!(w::BufferWriter, capacity::Int)
+    Base.resize!(w.data, capacity)
+    w.pos = 1
+    return w
+end
+
+@inline function finish!(w::BufferWriter)
+    Base.resize!(w.data, w.pos - 1)
+    return w.data
+end
+
 @inline function write_u8!(w::BufferWriter, v::UInt8)
     w.data[w.pos] = v
     w.pos += 1
@@ -61,12 +72,16 @@ end
 mutable struct BufferReader
     data::Vector{UInt8}
     pos::Int
+    limit::Int
 end
 
-BufferReader(data::Vector{UInt8}) = BufferReader(data, 1)
+BufferReader(data::Vector{UInt8}) = BufferReader(data, 1, length(data) + 1)
+
+@noinline _throw_truncated_buffer() = throw(ArgumentError("encoded histogram buffer is truncated"))
 
 @inline function read_u8!(r::BufferReader)
-    v = r.data[r.pos]
+    r.pos < r.limit || _throw_truncated_buffer()
+    v = @inbounds r.data[r.pos]
     r.pos += 1
     return v
 end
@@ -219,23 +234,49 @@ function get_needed_byte_buffer_capacity(h::AbstractHistogram)
 end
 
 function encode_into_byte_buffer(h::AbstractHistogram)
-    relevant_length = counts_index_for(h, max_value(h)) + 1
-    capacity = get_needed_byte_buffer_capacity(relevant_length)
-    buf = BufferWriter(capacity)
-    bytes_written = encode_into_byte_buffer!(buf, h, relevant_length)
-    return buf.data[1:bytes_written]
+    writer = BufferWriter(get_needed_byte_buffer_capacity(h))
+    return encode_into_byte_buffer!(writer, h)
 end
 
-function encode_into_compressed_byte_buffer(h::AbstractHistogram; compression_level::Integer=CodecZlib.Z_DEFAULT_COMPRESSION)
-    uncompressed = encode_into_byte_buffer(h)
+function encode_into_byte_buffer!(writer::BufferWriter, h::AbstractHistogram)
+    relevant_length = counts_index_for(h, max_value(h)) + 1
+    capacity = get_needed_byte_buffer_capacity(relevant_length)
+    prepare!(writer, capacity)
+    encode_into_byte_buffer!(writer, h, relevant_length)
+    return finish!(writer)
+end
+
+
+"""
+    EncodingWorkspace()
+
+Reusable scratch storage for histogram encoding. Byte vectors returned by the
+mutating encoding methods are owned by the workspace and are overwritten by the
+next call using that workspace.
+"""
+mutable struct EncodingWorkspace
+    uncompressed::BufferWriter
+    compressed::BufferWriter
+end
+
+EncodingWorkspace() = EncodingWorkspace(BufferWriter(0), BufferWriter(0))
+
+function encode_into_compressed_byte_buffer!(workspace::EncodingWorkspace, h::AbstractHistogram;
+    compression_level::Integer=CodecZlib.Z_DEFAULT_COMPRESSION)
+    uncompressed = encode_into_byte_buffer!(workspace.uncompressed, h)
     compressed = transcode(CodecZlib.ZlibCompressor(level=Int(compression_level)), uncompressed)
-    writer = BufferWriter(8 + length(compressed))
+    writer = prepare!(workspace.compressed, 8 + length(compressed))
     write_be_i32!(writer, compressed_encoding_cookie())
     write_be_i32!(writer, Int32(length(compressed)))
-    for b in compressed
-        write_u8!(writer, b)
-    end
-    return writer.data[1:writer.pos-1]
+    copyto!(writer.data, writer.pos, compressed, 1, length(compressed))
+    writer.pos += length(compressed)
+    return finish!(writer)
+end
+
+function encode_into_compressed_byte_buffer(h::AbstractHistogram;
+    compression_level::Integer=CodecZlib.Z_DEFAULT_COMPRESSION)
+    return encode_into_compressed_byte_buffer!(EncodingWorkspace(), h;
+        compression_level=compression_level)
 end
 
 function encode_into_byte_buffer!(w::BufferWriter, h::AbstractHistogram, relevant_length::Int)
@@ -259,13 +300,13 @@ end
 function fill_buffer_from_counts_array!(w::BufferWriter, h::AbstractHistogram, counts_limit::Int)
     src_index = 0
     while src_index < counts_limit
-        count = count_at_index(h, src_index)
+        count = @inbounds counts_get_normalised(h, src_index)
         count >= 0 || error("Cannot encode histogram containing negative counts ($count) at index $src_index")
         src_index += 1
         zeros_count = 0
         if count == 0
             zeros_count = 1
-            while src_index < counts_limit && count_at_index(h, src_index) == 0
+            while src_index < counts_limit && (@inbounds counts_get_normalised(h, src_index)) == 0
                 zeros_count += 1
                 src_index += 1
             end
@@ -315,8 +356,20 @@ function decode_from_byte_buffer(data::Vector{UInt8}, min_bar_for_highest_tracka
     histogram = _init_with_config(Histogram{Int64}, lowest, highest, Int64(sigfigs), true,
         conversion_ratio, Int64(normalizing_offset))
 
+    offset = Int64(normalizing_offset)
+    length_limit = counts_length(histogram)
+    -length_limit < offset < length_limit ||
+        throw(ArgumentError("normalizing index offset is outside the destination histogram"))
+
     word_size = word_size_in_bytes_from_cookie(cookie)
-    payload_end = min(reader.pos + payload_length, length(data) + 1)
+    if base == V0_ENCODING_COOKIE_BASE
+        payload_end = length(data) + 1
+    else
+        payload_length >= 0 || throw(ArgumentError("encoded payload length must be non-negative"))
+        payload_length <= length(data) + 1 - reader.pos ||
+            throw(ArgumentError("encoded payload is shorter than its declared length"))
+        payload_end = reader.pos + payload_length
+    end
     fill_counts_array_from_source_buffer!(histogram, reader, payload_end, word_size)
     reset_internal_counters!(histogram)
     return histogram
@@ -331,9 +384,11 @@ function decode_from_compressed_byte_buffer(data::Vector{UInt8}, min_bar_for_hig
         throw(ArgumentError("The buffer does not contain a compressed Histogram"))
     end
     compressed_length = Int(read_be_i32!(reader))
+    compressed_length >= 0 || throw(ArgumentError("compressed payload length must be non-negative"))
     start_pos = reader.pos
+    compressed_length <= length(data) + 1 - start_pos ||
+        throw(ArgumentError("The buffer does not contain the indicated payload amount"))
     end_pos = start_pos + compressed_length - 1
-    end_pos > length(data) && throw(ArgumentError("The buffer does not contain the indicated payload amount"))
     compressed = data[start_pos:end_pos]
     uncompressed = transcode(CodecZlib.ZlibDecompressor(), compressed)
     return decode_from_byte_buffer(uncompressed, min_bar_for_highest_trackable_value)
@@ -342,7 +397,11 @@ end
 function fill_counts_array_from_source_buffer!(h::AbstractHistogram, r::BufferReader, end_pos::Int, word_size::Int)
     (word_size == 2 || word_size == 4 || word_size == 8 || word_size == V2_MAX_WORD_SIZE_IN_BYTES) ||
         throw(ArgumentError("word size must be 2, 4, 8, or $V2_MAX_WORD_SIZE_IN_BYTES"))
+    1 <= end_pos <= length(r.data) + 1 || throw(ArgumentError("payload end is outside the source buffer"))
+    end_pos >= r.pos || throw(ArgumentError("payload end precedes payload start"))
+    r.limit = end_pos
     dst_index = 0
+    dst_length = counts_length(h)
     while r.pos < end_pos
         count = Int64(0)
         zeros_count = 0
@@ -363,9 +422,13 @@ function fill_counts_array_from_source_buffer!(h::AbstractHistogram, r::BufferRe
             end
         end
         if zeros_count > 0
+            zeros_count <= dst_length - dst_index ||
+                throw(ArgumentError("encoded zero run exceeds the destination histogram"))
             dst_index += zeros_count
         else
-            counts_set_direct!(h, dst_index, count)
+            dst_index < dst_length ||
+                throw(ArgumentError("encoded counts exceed the destination histogram"))
+            @inbounds counts_set_normalised!(h, dst_index, count)
             dst_index += 1
         end
     end

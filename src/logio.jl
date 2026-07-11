@@ -2,11 +2,13 @@ using Base64
 
 const HISTOGRAM_LOG_FORMAT_VERSION = "1.3"
 
-mutable struct HistogramLogWriter
-    io::IO
+mutable struct HistogramLogWriter{I<:IO}
+    io::I
     base_time_msec::Int64
-    function HistogramLogWriter(io::IO)
-        new(io, 0)
+    encoding_workspace::EncodingWorkspace
+    base64_pipe::Base64EncodePipe
+    function HistogramLogWriter(io::I) where {I<:IO}
+        new{I}(io, 0, EncodingWorkspace(), Base64EncodePipe(io))
     end
 end
 
@@ -41,26 +43,26 @@ function output_interval_histogram(writer::HistogramLogWriter,
     end_time_sec::Float64,
     histogram::AbstractHistogram,
     max_value_unit_ratio::Float64=1_000_000.0)
-    compressed = encode_into_compressed_byte_buffer(histogram)
-    payload = base64encode(compressed)
+    compressed = encode_into_compressed_byte_buffer!(writer.encoding_workspace, histogram)
     tag_value = tag(histogram)
     max_value = max_value_as_double(histogram) / max_value_unit_ratio
     if tag_value === nothing
-        @printf(writer.io, "%.3f,%.3f,%.3f,%s\n",
+        @printf(writer.io, "%.3f,%.3f,%.3f,",
             start_time_sec,
             end_time_sec - start_time_sec,
-            max_value,
-            payload)
+            max_value)
     else
         occursin(r"[,\s]", tag_value) &&
             throw(ArgumentError("Tag string cannot contain commas, spaces, or line breaks"))
-        @printf(writer.io, "Tag=%s,%.3f,%.3f,%.3f,%s\n",
+        @printf(writer.io, "Tag=%s,%.3f,%.3f,%.3f,",
             tag_value,
             start_time_sec,
             end_time_sec - start_time_sec,
-            max_value,
-            payload)
+            max_value)
     end
+    write(writer.base64_pipe, compressed)
+    close(writer.base64_pipe)
+    write(writer.io, '\n')
 end
 
 function output_interval_histogram(writer::HistogramLogWriter, histogram::AbstractHistogram)
@@ -70,28 +72,22 @@ function output_interval_histogram(writer::HistogramLogWriter, histogram::Abstra
         histogram)
 end
 
-mutable struct HistogramLogReader
-    io::IO
-    lines
-    state
+mutable struct HistogramLogReader{I<:IO}
+    io::I
     start_time_sec::Float64
     base_time_sec::Float64
     observed_start_time::Bool
     observed_base_time::Bool
-    function HistogramLogReader(io::IO)
-        lines = eachline(io)
-        new(io, lines, nothing, 0.0, 0.0, false, false)
+    function HistogramLogReader(io::I) where {I<:IO}
+        new{I}(io, 0.0, 0.0, false, false)
     end
 end
 
 start_time_sec(reader::HistogramLogReader) = reader.start_time_sec
 
 function next_line!(reader::HistogramLogReader)
-    res = reader.state === nothing ? iterate(reader.lines) : iterate(reader.lines, reader.state)
-    res === nothing && return nothing
-    line, st = res
-    reader.state = st
-    return line
+    eof(reader.io) && return nothing
+    return readline(reader.io)
 end
 
 function parse_comment_times!(reader::HistogramLogReader, line::AbstractString)

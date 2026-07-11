@@ -1,4 +1,5 @@
 #!/usr/bin/env julia
+pushfirst!(LOAD_PATH, dirname(@__DIR__))
 using HdrHistogram
 
 function record_loop!(h, n)

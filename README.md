@@ -15,7 +15,7 @@ implementation.  The current supported features are:
 * Synchronized histograms (recording/query methods are locked)
 * All iterator types (all values, recorded, percentiles, linear, logarithmic)
 * Auto-resizing of histograms
-* Reader/writer phaser and interval recorder
+* Reader/writer phaser and interval recorders
 * Histogram encoding/decoding (V2 encode, V0-V2 decode)
 * Histogram log reader/writer
 * Recorder and SingleWriterRecorder interval sampling
@@ -28,16 +28,18 @@ Features unlikely to be implemented:
 # Performance notes
 
 * Recording into fixed-size histograms is allocation-free; auto-resize and interval histogram swaps allocate by design.
-* Tests include a no-allocation check for `record_value!` on fixed histograms.
+* Tests include no-allocation checks for fixed-size recording, bulk recording, direct queries, and all iterator types.
 * `perf/iterator_alloc.jl` prints allocation counts for recording and iterator passes.
 * `perf/record_bench.jl`, `perf/query_bench.jl`, `perf/iterator_bench.jl`, and `perf/logio_bench.jl` provide quick throughput/alloc benchmarks.
-* On Julia < 1.12, add `Atomix` to use atomic histograms: `import Pkg; Pkg.add("Atomix")`.
-* For zero-allocation iteration, construct iterators and reuse iterator state.
+* Run benchmarks with `julia --project=perf -e 'using Pkg; Pkg.instantiate()'`, followed by e.g. `julia --project=perf perf/record_bench.jl`.
+* Julia < 1.12 uses Atomix for atomic storage; it is installed automatically as a package dependency.
+* Ordinary `for` iteration is allocation-free and yields immutable iteration values that are safe to retain.
 * For `SynchronizedHistogram`, keep iterators and multi-step reads inside `lock(h) do ... end` blocks.
-* `ConcurrentHistogram` auto-resize serializes recording; prefer a fixed range for contention-free updates.
-* Iterator iteration values are reused; if you need to retain values, copy the fields you need per step.
-* For allocation-free iteration, use `state = iterator_state(iter)` and `iterate!(iter, state)`.
-* For allocation-free queries and merges, reuse `RecordedValuesIterator` state and pass it to `mean`, `stddev`, `value_at_percentile`, or `add`.
+* `ConcurrentHistogram` auto-resize uses a writer phaser: ordinary inserts do not take the resize lock, while a resize still allocates and merges storage.
+* `mean`, `stddev`, `value_at_percentile`, and compatible-layout `add` use direct count-array kernels and do not require iterator state.
+* `push!`, `append!`, and `record_values!` provide idiomatic scalar and bulk recording APIs.
+* `EncodingWorkspace` and the `encode_into_*_byte_buffer!` methods reuse encoding storage.
+* The mutable `iterate!` cursor API remains available when explicit state reuse is convenient.
 * Convenience helpers like `recorded_values_state(h)` or `linear_iterator_state(h, bucket)` return `(iter, state)` pairs.
 * `percentile_plot` uses Plots.jl when available (optional dependency).
 
@@ -51,12 +53,12 @@ while HdrHistogram.iterate!(iter, state)
 end
 ```
 
-Example allocation-free queries:
+Example allocation-free queries and bulk recording:
 
 ```Julia
-iter, state = HdrHistogram.recorded_values_state(histogram)
-m = HdrHistogram.mean(histogram, iter, state)
-p99 = HdrHistogram.value_at_percentile(histogram, 99.0, iter, state)
+append!(histogram, values)
+m = HdrHistogram.mean(histogram)
+p99 = HdrHistogram.value_at_percentile(histogram, 99.0)
 ```
 
 Example percentile plot (requires Plots.jl):
@@ -99,6 +101,9 @@ HdrHistogram.record_value!(
     12345,          # Value to record
     10)             # Record value 10 times
 
+# Record an iterable of values in one bulk call
+append!(histogram, values)
+
 # Record value with correction for co-ordinated omission.
 HdrHistogram.record_corrected_value!(
     histogram,      # Histogram to record to
@@ -106,19 +111,17 @@ HdrHistogram.record_corrected_value!(
     1000)           # Record with expected interval of 1000.
 
 # Print out the values of the histogram
-HdrHistogram.percentiles_print(
+HdrHistogram.percentile_print(
     stdout,         # IO to write to
     histogram,      # Histogram to print
     5,              # Granularity of printed values
     1.0)            # Multiplier for results
 
 # Initialize interval recorder. Multiple tasks can write to a recorder at the same time
-recorder = HdrHistogram.IntervalRecorder(
-    HdrHistogram.Histogram(
-        1,          # Minimum value
-        3600000000, # Maximum value
-        3           # Number of significant figures
-    ))
+recorder = HdrHistogram.Recorder(
+    1,          # Minimum value
+    3600000000, # Maximum value
+    3)          # Number of significant figures
 
 # Record value
 HdrHistogram.record_value!(

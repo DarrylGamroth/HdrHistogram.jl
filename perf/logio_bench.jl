@@ -1,33 +1,22 @@
+pushfirst!(LOAD_PATH, dirname(@__DIR__))
 using HdrHistogram
+using BenchmarkTools
 
 const HH = HdrHistogram
-
-function bench(label, n, f, args...)
-    GC.gc()
-    f(args...)
-    GC.gc()
-    t0 = time_ns()
-    for _ in 1:n
-        f(args...)
-    end
-    elapsed = (time_ns() - t0)
-    ns_per = elapsed / n
-    rate = 1e9 / ns_per
-    alloc = @allocated f(args...)
-    println(rpad(label, 28),
-        "ops/sec=", round(rate, digits=1),
-        " ns/op=", round(ns_per, digits=1),
-        " alloc=", alloc)
-end
+include(joinpath(@__DIR__, "benchutils.jl"))
 
 hist = HH.Histogram(1, 1_000_000, 3)
 for i in 1:100_000
     HH.record_value!(hist, i % 10_000)
 end
 
-bench("encode compressed", 200, HH.encode_into_compressed_byte_buffer, hist)
+report_benchmark("encode compressed", @benchmark(HH.encode_into_compressed_byte_buffer($hist), evals=1))
+workspace = HH.EncodingWorkspace()
+HH.encode_into_compressed_byte_buffer!(workspace, hist)
+report_benchmark("encode compressed (reuse)",
+    @benchmark(HH.encode_into_compressed_byte_buffer!($workspace, $hist), evals=1))
 encoded = HH.encode_into_compressed_byte_buffer(hist)
-bench("decode compressed", 200, HH.decode_from_compressed_byte_buffer, encoded)
+report_benchmark("decode compressed", @benchmark(HH.decode_from_compressed_byte_buffer($encoded), evals=1))
 
 function build_log(n)
     buf = IOBuffer()
@@ -55,4 +44,4 @@ function read_log!(bytes)
     return nothing
 end
 
-bench("log reader", 50, read_log!, log_bytes)
+report_benchmark("log reader", @benchmark(read_log!($log_bytes), evals=1))

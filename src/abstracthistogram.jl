@@ -106,13 +106,16 @@ function resize!(h::AbstractHistogram{C}, highest_trackable_value) where {C}
 end
 
 @inline function normalize_index(h::AbstractHistogram, index)
-    if normalizing_index_offset(h) == 0
+    return normalize_index(index, normalizing_index_offset(h), counts_length(h))
+end
+
+@inline function normalize_index(index, normalizing_offset, array_length)
+    if normalizing_offset == 0
         return index
     end
 
-    normalized_index = index - normalizing_index_offset(h)
+    normalized_index = index - normalizing_offset
 
-    array_length = counts_length(h)
     if normalized_index < 0
         normalized_index += array_length
     elseif normalized_index >= array_length
@@ -122,26 +125,40 @@ end
     return normalized_index
 end
 
-@inline function counts_get_direct(h::AbstractHistogram, index)
-    return @inbounds counts(h)[index+1]
+Base.@propagate_inbounds @inline function counts_get_direct(h::AbstractHistogram, index)
+    i = index + 1
+    @boundscheck checkbounds(counts(h), i)
+    return @inbounds counts(h)[i]
 end
 
-@inline function counts_get_normalised(h::AbstractHistogram, index)
+Base.@propagate_inbounds @inline function counts_get_normalised(h::AbstractHistogram, index)
     return counts_get_direct(h, normalize_index(h, index))
 end
 
-@inline function counts_inc_direct!(h::AbstractHistogram, index, value)
-    return @inbounds counts(h)[index+1] += value
+Base.@propagate_inbounds @inline function counts_inc_direct!(h::AbstractHistogram, index, value)
+    i = index + 1
+    @boundscheck checkbounds(counts(h), i)
+    return @inbounds counts(h)[i] += value
 end
 
-@inline function counts_inc_normalised!(h::AbstractHistogram, index, value)
+Base.@propagate_inbounds @inline function counts_inc_normalised!(h::AbstractHistogram, index, value)
     normalised_index = normalize_index(h, index)
     counts_inc_direct!(h, normalised_index, value)
     total_count_inc!(h, value)
 end
 
+Base.@propagate_inbounds @inline function counts_set_direct!(h::AbstractHistogram, index, value)
+    i = index + 1
+    @boundscheck checkbounds(counts(h), i)
+    @inbounds counts(h)[i] = value
+end
+
+Base.@propagate_inbounds @inline function counts_set_normalised!(h::AbstractHistogram, index, value)
+    counts_set_direct!(h, normalize_index(h, index), value)
+end
+
 @inline function update_min_max!(h::AbstractHistogram, value)
-    min_value!(h, min(min_value(h), value))
+    value == 0 || min_value!(h, min(min_value(h), value))
     max_value!(h, max(max_value(h), value))
 end
 
@@ -225,8 +242,8 @@ function reset_internal_counters!(h::AbstractHistogram{C}) where {C}
     observed_total_count = 0
 
     # For compatability all indicies are 0-based
-    for i in 0:counts_length(h)-1
-        if (count = counts_get_direct(h, i)) > 0
+    @inbounds for i in 0:counts_length(h)-1
+        if (count = counts_get_normalised(h, i)) > 0
             observed_total_count += count
             max_index = i
             if min_non_zero_index == -1 && i != 0
@@ -266,22 +283,29 @@ end
 
 #### UPDATES ####
 
-@inline function record_value!(h::AbstractHistogram, value::Int64, count::Int64=1)
-    value >= 0 || throw(ArgumentError("value $value must be >= 0"))
-    count > 0 || throw(ArgumentError("count $count must be > 0"))
+@noinline _throw_negative_value(value) = throw(ArgumentError("value $value must be >= 0"))
+@noinline _throw_invalid_count(count) = throw(ArgumentError("count $count must be > 0"))
+@noinline _throw_value_out_of_range(value) = throw(ArgumentError("value $value outside of histogram range"))
 
-    counts_index = counts_index_for(h, value)
-    if counts_index >= counts_length(h)
+@inline function record_value!(h::AbstractHistogram, value::Int64, count::Int64=1)
+    value >= 0 || _throw_negative_value(value)
+    count > 0 || _throw_invalid_count(count)
+
+    index = counts_index_for(h, value)
+    if index >= counts_length(h)
         if auto_resize(h)
             resize!(h, value)
         else
-            throw(ArgumentError("value $value outside of histogram range"))
+            _throw_value_out_of_range(value)
         end
     end
 
-    counts_inc_normalised!(h, counts_index, count)
+    @inbounds counts_inc_normalised!(h, index, count)
     update_min_max!(h, value)
 end
+
+@inline record_value!(h::AbstractHistogram, value::Integer, count::Integer=1) =
+    record_value!(h, Int64(value), Int64(count))
 
 @inline function record_corrected_value!(h::AbstractHistogram, value::Int64, expected_interval::Int64, count::Int64=1)
     record_value!(h, value, count)
@@ -296,16 +320,109 @@ end
     end
 end
 
-function add(h::AbstractHistogram, from::AbstractHistogram)
-    iter = RecordedValuesIterator(from)
-    state = reset_state!(iter, HistogramIteratorState(iter))
-    return add(h, from, iter, state)
+@inline record_corrected_value!(h::AbstractHistogram, value::Integer,
+    expected_interval::Integer, count::Integer=1) =
+    record_corrected_value!(h, Int64(value), Int64(expected_interval), Int64(count))
+
+Base.push!(h::AbstractHistogram, value::Integer) = (record_value!(h, Int64(value)); h)
+
+"""
+    record_values!(histogram, values[, count])
+
+Record every integer in `values`, optionally adding `count` occurrences of each
+value. The histogram is returned so this method also backs `append!`.
+"""
+function record_values!(h::AbstractHistogram, values)
+    for value in values
+        record_value!(h, Int64(value))
+    end
+    return h
 end
 
+function record_values!(h::AbstractHistogram, values, count::Integer)
+    count64 = Int64(count)
+    for value in values
+        record_value!(h, Int64(value), count64)
+    end
+    return h
+end
+
+Base.append!(h::AbstractHistogram, values) = record_values!(h, values)
+
+@inline function _direct_add_compatible(h::AbstractHistogram, from::AbstractHistogram)
+    return bucket_count(h) == bucket_count(from) &&
+           sub_bucket_count(h) == sub_bucket_count(from) &&
+           unit_magnitude(h) == unit_magnitude(from) &&
+           normalizing_index_offset(h) == normalizing_index_offset(from) &&
+           counts_length(h) == counts_length(from) &&
+           !(from isa ConcurrentHistogram)
+end
+
+function _prepare_to_add!(h::AbstractHistogram, from::AbstractHistogram)
+    total_count(from) == 0 && return
+    highest_recordable = highest_equivalent_value(h, value_at_index(h, counts_length(h) - 1))
+    source_max = max(from)
+    if source_max > highest_recordable
+        auto_resize(h) || throw(ArgumentError("source histogram contains values outside of destination range"))
+        resize!(h, source_max)
+    end
+end
+
+function _add_direct!(h::AbstractHistogram, from::AbstractHistogram)
+    observed_total = Int64(0)
+    @inbounds for i in 0:counts_length(from)-1
+        count = counts_get_normalised(from, i)
+        if count > 0
+            counts_inc_direct!(h, normalize_index(h, i), count)
+            observed_total += Int64(count)
+        end
+    end
+    return _finish_direct_add!(h, from, observed_total)
+end
+
+@inline function _finish_direct_add!(h::AbstractHistogram, from::AbstractHistogram, observed_total::Int64)
+    total_count_inc!(h, observed_total)
+    if observed_total > 0
+        update_min_max!(h, max_value(from))
+        source_min = min_value(from)
+        source_min == typemax(Int64) || update_min_max!(h, source_min)
+    end
+    return h
+end
+
+function _add_by_value!(h::AbstractHistogram, from::AbstractHistogram)
+    @inbounds for i in 0:counts_length(from)-1
+        count = counts_get_normalised(from, i)
+        count > 0 && record_value!(h, value_at_index(from, i), Int64(count))
+    end
+    return h
+end
+
+function add(h::AbstractHistogram, from::AbstractHistogram)
+    _prepare_to_add!(h, from)
+    if _direct_add_compatible(h, from)
+        _add_direct!(h, from)
+    else
+        _add_by_value!(h, from)
+    end
+    start_time_stamp!(h, min(start_time_stamp(h), start_time_stamp(from)))
+    end_time_stamp!(h, max(end_time_stamp(h), end_time_stamp(from)))
+    return h
+end
+
+"""Add `from` to `h` in place. `add` is retained as a Java-compatible alias."""
+add!(h::AbstractHistogram, from::AbstractHistogram) = add(h, from)
+
 function add_while_correcting_for_coordinated_omission(h::AbstractHistogram, from::AbstractHistogram, expected_interval::Int64)
-    iter = RecordedValuesIterator(from)
-    state = reset_state!(iter, HistogramIteratorState(iter))
-    return add_while_correcting_for_coordinated_omission(h, from, expected_interval, iter, state)
+    _prepare_to_add!(h, from)
+    @inbounds for i in 0:counts_length(from)-1
+        count = counts_get_normalised(from, i)
+        if count > 0
+            value = highest_equivalent_value(from, value_at_index(from, i))
+            record_corrected_value!(h, value, expected_interval, Int64(count))
+        end
+    end
+    return h
 end
 
 #### VALUES ####
@@ -322,7 +439,7 @@ function max_value_as_double(h::AbstractHistogram{C}) where {C}
 end
 
 function Base.min(h::AbstractHistogram{C}) where {C}
-    if count_at_index(h, 0) > zero(C)
+    if total_count(h) == 0 || count_at_index(h, 0) > zero(C)
         return 0
     end
 
@@ -333,20 +450,25 @@ function Base.min(h::AbstractHistogram{C}) where {C}
     return lowest_equivalent_value(h, min_value(h))
 end
 
-function count_at_percentile(h::AbstractHistogram{C}, percentile::Real) where {C}
+function count_at_percentile(h::AbstractHistogram, percentile::Real)
     # Truncate to 0..100%, and remove 1 unit of least precision to avoid roundoff overruns into next bucket when we
     # subsequently round up to the nearest integer:
-    requested_percentile = prevfloat(clamp(percentile, 0.0, 100.0))
+    percentile_float = Float64(percentile)
+    requested_percentile = isnan(percentile_float) ? 0.0 :
+                           clamp(prevfloat(percentile_float), 0.0, 100.0)
 
     # Derive the count at the requested percentile. We round up to nearest integer to ensure that the
     # largest value that the requested percentile of overall recorded values is <= is actually included.
-    return max(ceil(C, requested_percentile * total_count(h) / 100.0), 1)
+    return max(ceil(Int64, requested_percentile * total_count(h) / 100.0), 1)
 end
 
 function value_at_percentile(h::AbstractHistogram, percentile::Real)
-    iter = RecordedValuesIterator(h)
-    state = reset_state!(iter, HistogramIteratorState(iter))
-    return value_at_percentile(h, percentile, iter, state)
+    target_count = count_at_percentile(h, percentile)
+    index = _index_at_cumulative_count(h, target_count)
+    index < 0 && return 0
+    value = value_at_index(h, index)
+    return percentile == zero(typeof(percentile)) ?
+           lowest_equivalent_value(h, value) : highest_equivalent_value(h, value)
 end
 
 function value_at_percentile(h::AbstractHistogram, percentiles, values::AbstractVector{<:Number})
@@ -359,16 +481,29 @@ function value_at_percentile(h::AbstractHistogram, percentiles, values::Abstract
         end
     end
 
-    # to avoid allocations we use the values array for intermediate computation
-    # i.e. to store the expected cumulative count at each percentile
+    # Reuse the destination array for cumulative-count targets.
     for i in eachindex(percentiles)
         values[i] = count_at_percentile(h, percentiles[i])
     end
-    at_pos = 1
 
-    iter = RecordedValuesIterator(h)
-    state = reset_state!(iter, HistogramIteratorState(iter))
-    return value_at_percentile(h, percentiles, values, iter, state)
+    at_pos = firstindex(percentiles)
+    last_pos = lastindex(percentiles)
+    cumulative_count = Int64(0)
+    @inbounds for index in 0:counts_length(h)-1
+        cumulative_count += Int64(counts_get_normalised(h, index))
+        while at_pos <= last_pos && cumulative_count >= values[at_pos]
+            value = value_at_index(h, index)
+            values[at_pos] = percentiles[at_pos] == zero(eltype(percentiles)) ?
+                             lowest_equivalent_value(h, value) : highest_equivalent_value(h, value)
+            at_pos += 1
+        end
+        at_pos > last_pos && return values
+    end
+    while at_pos <= last_pos
+        @inbounds values[at_pos] = 0
+        at_pos += 1
+    end
+    return values
 end
 
 function value_at_percentile(h::AbstractHistogram{C}, percentiles::AbstractVector) where {C}
@@ -383,15 +518,29 @@ function mean(h::AbstractHistogram{C}) where {C}
     if count_total == zero(C)
         return 0.0
     end
-    iter = RecordedValuesIterator(h)
-    state = reset_state!(iter, HistogramIteratorState(iter))
-    return mean(h, iter, state)
+    @inbounds for i in 0:counts_length(h)-1
+        count = counts_get_normalised(h, i)
+        if count != 0
+            value = median_equivalent_value(h, value_at_index(h, i))
+            total += Int128(count) * value
+        end
+    end
+    return total / count_total
 end
 
 function stddev(h::AbstractHistogram{C}) where {C}
-    iter = RecordedValuesIterator(h)
-    state = reset_state!(iter, HistogramIteratorState(iter))
-    return stddev(h, iter, state)
+    count_total = total_count(h)
+    count_total == zero(C) && return 0.0
+    average = mean(h)
+    geometric_deviation_total = 0.0
+    @inbounds for i in 0:counts_length(h)-1
+        count = counts_get_normalised(h, i)
+        if count != 0
+            deviation = median_equivalent_value(h, value_at_index(h, i)) - average
+            geometric_deviation_total += deviation^2 * count
+        end
+    end
+    return sqrt(geometric_deviation_total / count_total)
 end
 
 function values_are_equivalent(h::AbstractHistogram, a::Int64, b::Int64)
@@ -400,16 +549,47 @@ end
 
 function count_at_value(h::AbstractHistogram, value::Int64)
     value >= 0 || throw(ArgumentError("value $value must be >= 0"))
-    return counts_get_normalised(h, counts_index_for(h, value))
+    index = clamp(counts_index_for(h, value), 0, counts_length(h) - 1)
+    return @inbounds counts_get_normalised(h, index)
 end
 
 function count_at_index(h::AbstractHistogram, index::Int64)
-    index >= 0 || throw(ArgumentError("index $index must be >= 0"))
+    0 <= index < counts_length(h) || throw(BoundsError(counts(h), index + 1))
     return counts_get_normalised(h, index)
 end
 
-@inline function counts_set_direct!(h::AbstractHistogram, index, value)
-    @inbounds counts(h)[index+1] = value
+function _index_at_cumulative_count(h::AbstractHistogram, target_count::Integer)
+    cumulative_count = Int64(0)
+    index = 0
+    limit = counts_length(h)
+
+    # Four-at-a-time loading retains early-exit semantics while allowing LLVM to
+    # combine adjacent non-atomic loads on the common zero-offset layout.
+    @inbounds while index + 4 <= limit
+        c0 = Int64(counts_get_normalised(h, index))
+        c1 = Int64(counts_get_normalised(h, index + 1))
+        c2 = Int64(counts_get_normalised(h, index + 2))
+        c3 = Int64(counts_get_normalised(h, index + 3))
+        chunk_total = c0 + c1 + c2 + c3
+        if cumulative_count + chunk_total >= target_count
+            cumulative_count += c0
+            cumulative_count >= target_count && return index
+            cumulative_count += c1
+            cumulative_count >= target_count && return index + 1
+            cumulative_count += c2
+            cumulative_count >= target_count && return index + 2
+            return index + 3
+        end
+        cumulative_count += chunk_total
+        index += 4
+    end
+
+    @inbounds while index < limit
+        cumulative_count += Int64(counts_get_normalised(h, index))
+        cumulative_count >= target_count && return index
+        index += 1
+    end
+    return -1
 end
 
 function percentile_print(io::IO, h::AbstractHistogram, ticks_per_half_distance, value_scale)

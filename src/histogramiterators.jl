@@ -8,6 +8,24 @@ mutable struct AllValuesIteratorState <: AbstractHistogramIteratorStateSpecific
 end
 HistogramIteratorState(iter::AllValuesIterator) = HistogramIteratorState(iter, AllValuesIteratorState(-1))
 
+struct AllValuesIteratorSnapshot
+    visited_index::Int64
+end
+
+snapshot_specifics(::AllValuesIterator) = AllValuesIteratorSnapshot(-1)
+
+@inline function snapshot_has_next(iter::AllValuesIterator, expected_total_count, current_index, next_value,
+    total_count_to_current_index, specifics)
+    total_count(histogram(iter)) == expected_total_count || error("Concurrent Modification Exception")
+    return current_index < counts_length(histogram(iter)), specifics
+end
+
+@inline snapshot_reached_iteration_level(::AllValuesIterator, total_count, current_index,
+    current_value, count, cumulative_count, specifics) = specifics.visited_index != current_index
+
+@inline snapshot_increment_iteration_level(::AllValuesIterator, current_index, specifics) =
+    AllValuesIteratorSnapshot(current_index)
+
 function reset_state!(iter::AllValuesIterator, state::HistogramIteratorState{AllValuesIteratorState})
     h = histogram(iter)
     state.total_count = total_count(h)
@@ -51,6 +69,24 @@ mutable struct RecordedValuesIteratorState <: AbstractHistogramIteratorStateSpec
     visited_index::Int64
 end
 HistogramIteratorState(iter::RecordedValuesIterator) = HistogramIteratorState(iter, RecordedValuesIteratorState(-1))
+
+struct RecordedValuesIteratorSnapshot
+    visited_index::Int64
+end
+
+snapshot_specifics(::RecordedValuesIterator) = RecordedValuesIteratorSnapshot(-1)
+
+@inline function snapshot_has_next(iter::RecordedValuesIterator, expected_total_count, current_index, next_value,
+    total_count_to_current_index, specifics)
+    total_count(histogram(iter)) == expected_total_count || error("Concurrent Modification Exception")
+    return total_count_to_current_index < expected_total_count, specifics
+end
+
+@inline snapshot_reached_iteration_level(::RecordedValuesIterator, total_count, current_index,
+    current_value, count, cumulative_count, specifics) = count != 0 && specifics.visited_index != current_index
+
+@inline snapshot_increment_iteration_level(::RecordedValuesIterator, current_index, specifics) =
+    RecordedValuesIteratorSnapshot(current_index)
 
 @inline function has_next(iter::RecordedValuesIterator, state::HistogramIteratorState{RecordedValuesIteratorState})
     return has_next_base(iter, state)
@@ -161,20 +197,12 @@ end
 
 function add(h::AbstractHistogram, from::AbstractHistogram,
     iter::RecordedValuesIterator, state::HistogramIteratorState{RecordedValuesIteratorState})
-    reset_state!(iter, state)
-    while iterate!(iter, state)
-        i = state.iter_value
-        record_value!(h, value_iterated_to(i), count_at_value_iterated_to(i))
-    end
+    return add(h, from)
 end
 
 function add_while_correcting_for_coordinated_omission(h::AbstractHistogram, from::AbstractHistogram, expected_interval::Int64,
     iter::RecordedValuesIterator, state::HistogramIteratorState{RecordedValuesIteratorState})
-    reset_state!(iter, state)
-    while iterate!(iter, state)
-        i = state.iter_value
-        record_corrected_value!(h, value_iterated_to(i), expected_interval, count_at_value_iterated_to(i))
-    end
+    return add_while_correcting_for_coordinated_omission(h, from, expected_interval)
 end
 
 function increment_iteration_level(iter::RecordedValuesIterator, state::HistogramIteratorState{RecordedValuesIteratorState})
@@ -200,6 +228,47 @@ mutable struct PercentileIteratorState <: AbstractHistogramIteratorStateSpecific
     reached_last_recorded_value::Bool
 end
 HistogramIteratorState(iter::PercentileIterator) = HistogramIteratorState(iter, PercentileIteratorState(0.0, 0.0, false))
+
+struct PercentileIteratorSnapshot
+    percentile_level_iterated_to::Float64
+    percentile_level_iterated_from::Float64
+    reached_last_recorded_value::Bool
+end
+
+snapshot_specifics(::PercentileIterator) = PercentileIteratorSnapshot(0.0, 0.0, false)
+
+@inline function snapshot_has_next(::PercentileIterator, total_count, current_index, next_value,
+    total_count_to_current_index, specifics::PercentileIteratorSnapshot)
+    if total_count_to_current_index < total_count
+        return true, specifics
+    elseif !specifics.reached_last_recorded_value && total_count > 0
+        return true, PercentileIteratorSnapshot(100.0,
+            specifics.percentile_level_iterated_from, true)
+    end
+    return false, specifics
+end
+
+
+@inline function snapshot_reached_iteration_level(::PercentileIterator, total_count, current_index,
+    current_value, count, cumulative_count, specifics::PercentileIteratorSnapshot)
+    count == 0 && return false
+    return 100.0 * cumulative_count / total_count >= specifics.percentile_level_iterated_to
+end
+
+@inline function snapshot_increment_iteration_level(iter::PercentileIterator, current_index,
+    specifics::PercentileIteratorSnapshot)
+    percentile_to = specifics.percentile_level_iterated_to
+    percentile_gap = 100.0 - percentile_to
+    if percentile_gap != 0.0
+        half_distance = 2^floor(Int64, log2(100.0 / percentile_gap) + 1)
+        percentile_to += 100.0 / (half_distance * iter.ticks_per_half_distance)
+    end
+    return PercentileIteratorSnapshot(percentile_to,
+        specifics.percentile_level_iterated_to, specifics.reached_last_recorded_value)
+end
+
+@inline snapshot_percentile_iterated_to(::PercentileIterator, cumulative_count, total_count,
+    specifics::PercentileIteratorSnapshot) = specifics.percentile_level_iterated_to
 
 function reset_state!(iter::PercentileIterator, state::HistogramIteratorState{PercentileIteratorState})
     h = histogram(iter)
@@ -270,8 +339,41 @@ mutable struct LinearIteratorState <: AbstractHistogramIteratorStateSpecific
     current_step_lowest_value_reporting_level::Int64
 end
 HistogramIteratorState(iter::LinearIterator) = HistogramIteratorState(iter,
-    LinearIteratorState(iter.value_units_per_bucket,
-        lowest_equivalent_value(iter.histogram, iter.value_units_per_bucket)))
+    LinearIteratorState(iter.value_units_per_bucket - 1,
+        lowest_equivalent_value(iter.histogram, iter.value_units_per_bucket - 1)))
+
+struct LinearIteratorSnapshot
+    current_step_highest_value_reporting_level::Int64
+    current_step_lowest_value_reporting_level::Int64
+end
+
+snapshot_specifics(iter::LinearIterator) = LinearIteratorSnapshot(
+    iter.value_units_per_bucket - 1,
+    lowest_equivalent_value(iter.histogram, iter.value_units_per_bucket - 1))
+
+@inline function snapshot_has_next(iter::LinearIterator, total_count, current_index, next_value,
+    total_count_to_current_index, specifics::LinearIteratorSnapshot)
+    if total_count_to_current_index < total_count
+        return true, specifics
+    end
+    return specifics.current_step_highest_value_reporting_level < next_value, specifics
+end
+
+
+@inline function snapshot_reached_iteration_level(iter::LinearIterator, total_count, current_index,
+    current_value, count, cumulative_count, specifics::LinearIteratorSnapshot)
+    return current_value >= specifics.current_step_lowest_value_reporting_level ||
+           current_index >= counts_length(histogram(iter)) - 1
+end
+
+@inline function snapshot_increment_iteration_level(iter::LinearIterator, current_index,
+    specifics::LinearIteratorSnapshot)
+    highest = specifics.current_step_highest_value_reporting_level + iter.value_units_per_bucket
+    return LinearIteratorSnapshot(highest, lowest_equivalent_value(iter.histogram, highest))
+end
+
+@inline snapshot_value_iterated_to(::LinearIterator, current_value,
+    specifics::LinearIteratorSnapshot) = specifics.current_step_highest_value_reporting_level
 
 function reset_state!(iter::LinearIterator, state::HistogramIteratorState{LinearIteratorState})
     h = histogram(iter)
@@ -285,9 +387,9 @@ function reset_state!(iter::LinearIterator, state::HistogramIteratorState{Linear
     state.total_value_to_current_index = 0
     state.count_at_this_value = 0
     state.fresh_sub_bucket = true
-    state.specifics.current_step_highest_value_reporting_level = iter.value_units_per_bucket
+    state.specifics.current_step_highest_value_reporting_level = iter.value_units_per_bucket - 1
     state.specifics.current_step_lowest_value_reporting_level =
-        lowest_equivalent_value(h, iter.value_units_per_bucket)
+        lowest_equivalent_value(h, iter.value_units_per_bucket - 1)
     return state
 end
 
@@ -298,7 +400,7 @@ function has_next(iter::LinearIterator, state::HistogramIteratorState{LinearIter
     end
     # If next iterate does not move to the next sub bucket index (which is empty if
     # if we reached this point), then we are not done iterating... Otherwise we're done.
-    return state.specifics.current_step_lowest_value_reporting_level < state.next_value_at_index, state
+    return state.specifics.current_step_highest_value_reporting_level < state.next_value_at_index, state
 end
 
 function increment_iteration_level(iter::LinearIterator, state::HistogramIteratorState{LinearIteratorState})
@@ -312,7 +414,8 @@ function value_iterated_to(iter::LinearIterator, state::HistogramIteratorState{L
 end
 
 function reached_iteration_level(iter::LinearIterator, state::HistogramIteratorState{LinearIteratorState})
-    return state.current_value_at_index >= state.specifics.current_step_lowest_value_reporting_level
+    return state.current_value_at_index >= state.specifics.current_step_lowest_value_reporting_level ||
+           state.current_index >= counts_length(histogram(iter)) - 1
 end
 
 struct LogarithmicIterator{C,T<:AbstractHistogram{C}} <: AbstractHistogramIterator
@@ -330,8 +433,47 @@ mutable struct LogarithmicIteratorState <: AbstractHistogramIteratorStateSpecifi
 end
 HistogramIteratorState(iter::LogarithmicIterator) = HistogramIteratorState(iter,
     LogarithmicIteratorState(iter.value_units_per_bucket,
-        iter.value_units_per_bucket,
-        lowest_equivalent_value(iter.histogram, iter.value_units_per_bucket)))
+        iter.value_units_per_bucket - 1,
+        lowest_equivalent_value(iter.histogram, iter.value_units_per_bucket - 1)))
+
+struct LogarithmicIteratorSnapshot
+    next_value_reporting_level::Float64
+    current_step_highest_value_reporting_level::Int64
+    current_step_lowest_value_reporting_level::Int64
+end
+
+snapshot_specifics(iter::LogarithmicIterator) = LogarithmicIteratorSnapshot(
+    iter.value_units_per_bucket,
+    iter.value_units_per_bucket - 1,
+    lowest_equivalent_value(iter.histogram, iter.value_units_per_bucket - 1))
+
+@inline function snapshot_has_next(iter::LogarithmicIterator, total_count, current_index, next_value,
+    total_count_to_current_index, specifics::LogarithmicIteratorSnapshot)
+    if total_count_to_current_index < total_count
+        return true, specifics
+    end
+    next_lowest = lowest_equivalent_value(iter.histogram,
+        floor(Int64, specifics.next_value_reporting_level))
+    return next_lowest < next_value, specifics
+end
+
+
+@inline function snapshot_reached_iteration_level(iter::LogarithmicIterator, total_count, current_index,
+    current_value, count, cumulative_count, specifics::LogarithmicIteratorSnapshot)
+    return current_value >= specifics.current_step_lowest_value_reporting_level ||
+           current_index >= counts_length(histogram(iter)) - 1
+end
+
+@inline function snapshot_increment_iteration_level(iter::LogarithmicIterator, current_index,
+    specifics::LogarithmicIteratorSnapshot)
+    next_level = specifics.next_value_reporting_level * iter.log_base
+    highest = floor(Int64, next_level) - 1
+    return LogarithmicIteratorSnapshot(next_level, highest,
+        lowest_equivalent_value(iter.histogram, highest))
+end
+
+@inline snapshot_value_iterated_to(::LogarithmicIterator, current_value,
+    specifics::LogarithmicIteratorSnapshot) = specifics.current_step_highest_value_reporting_level
 
 function reset_state!(iter::LogarithmicIterator, state::HistogramIteratorState{LogarithmicIteratorState})
     h = histogram(iter)
@@ -346,9 +488,9 @@ function reset_state!(iter::LogarithmicIterator, state::HistogramIteratorState{L
     state.count_at_this_value = 0
     state.fresh_sub_bucket = true
     state.specifics.next_value_reporting_level = iter.value_units_per_bucket
-    state.specifics.current_step_highest_value_reporting_level = iter.value_units_per_bucket
+    state.specifics.current_step_highest_value_reporting_level = iter.value_units_per_bucket - 1
     state.specifics.current_step_lowest_value_reporting_level =
-        lowest_equivalent_value(h, iter.value_units_per_bucket)
+        lowest_equivalent_value(h, iter.value_units_per_bucket - 1)
     return state
 end
 
@@ -373,5 +515,6 @@ function value_iterated_to(iter::LogarithmicIterator, state::HistogramIteratorSt
 end
 
 function reached_iteration_level(iter::LogarithmicIterator, state::HistogramIteratorState{LogarithmicIteratorState})
-    return state.current_value_at_index >= state.specifics.current_step_lowest_value_reporting_level
+    return state.current_value_at_index >= state.specifics.current_step_lowest_value_reporting_level ||
+           state.current_index >= counts_length(histogram(iter)) - 1
 end

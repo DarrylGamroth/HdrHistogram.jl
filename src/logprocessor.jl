@@ -10,17 +10,14 @@ function Base.read(reader::LazyHistogramReader)
     return decode_from_compressed_byte_buffer(compressed, 0)
 end
 
-mutable struct HistogramLogScanner
-    io::IO
-    lines
-    state
+mutable struct HistogramLogScanner{I<:IO}
+    io::I
     start_time_sec::Float64
     base_time_sec::Float64
     observed_start_time::Bool
     observed_base_time::Bool
-    function HistogramLogScanner(io::IO)
-        lines = eachline(io)
-        new(io, lines, nothing, 0.0, 0.0, false, false)
+    function HistogramLogScanner(io::I) where {I<:IO}
+        new{I}(io, 0.0, 0.0, false, false)
     end
 end
 
@@ -28,11 +25,8 @@ start_time_sec(scanner::HistogramLogScanner) = scanner.start_time_sec
 base_time_sec(scanner::HistogramLogScanner) = scanner.base_time_sec
 
 function _next_line!(scanner::HistogramLogScanner)
-    res = scanner.state === nothing ? iterate(scanner.lines) : iterate(scanner.lines, scanner.state)
-    res === nothing && return nothing
-    line, st = res
-    scanner.state = st
-    return line
+    eof(scanner.io) && return nothing
+    return readline(scanner.io)
 end
 
 function _scan_comment_times!(scanner::HistogramLogScanner, line::AbstractString)
@@ -103,8 +97,8 @@ function process!(scanner::HistogramLogScanner;
     end
 end
 
-mutable struct HistogramLogProcessor
-    scanner::HistogramLogScanner
+mutable struct HistogramLogProcessor{S<:HistogramLogScanner}
+    scanner::S
     tag::Union{Nothing,String}
     range_start_sec::Float64
     range_end_sec::Float64

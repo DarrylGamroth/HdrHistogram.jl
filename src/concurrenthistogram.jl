@@ -19,7 +19,8 @@ mutable struct ConcurrentHistogram{C} <: AbstractHistogram{C}
     const auto_resize::Bool
     @atomic total_count::Int64
     @atomic counts::AtomicCounts{C}
-    const resize_lock::ReentrantLock
+    inactive_counts::Union{Nothing,AtomicCounts{C}}
+    const resize_phaser::WriterReaderPhaser
 end
 
 @static if VERSION < v"1.12"
@@ -81,9 +82,9 @@ total_count(h::ConcurrentHistogram) = @atomic h.total_count
 total_count!(h::ConcurrentHistogram, value) = @atomic h.total_count = value
 total_count_inc!(h::ConcurrentHistogram, value) = @atomic h.total_count += value
 
-counts(h::ConcurrentHistogram) = h.counts
+counts(h::ConcurrentHistogram) = @atomic h.counts
 counts!(h::ConcurrentHistogram, value) = @atomic h.counts = value
-counts_length(h::ConcurrentHistogram) = length(h.counts)
+counts_length(h::ConcurrentHistogram) = length((@atomic h.counts))
 
 """
     ConcurrentHistogram(C::Type{<:Signed}, lowest_discernible_value, highest_trackable_value, significant_figures)
@@ -158,73 +159,121 @@ function _init_with_config(::Type{ConcurrentHistogram{C}},
         sub_bucket_mask, sub_bucket_count, leading_zero_count_base, bucket_count,
         typemax(Int64), 0, normalizing_index_offset, conversion_ratio,
         typemax(Int64), 0, nothing, auto_resize, 0,
-        counts_init(ConcurrentHistogram{C}, counts_len), ReentrantLock())
+        counts_init(ConcurrentHistogram{C}, counts_len), nothing, WriterReaderPhaser())
 end
 
-@inline function counts_get_direct(h::ConcurrentHistogram, index)
+Base.@propagate_inbounds @inline function counts_get_direct(h::ConcurrentHistogram, index)
     i = index + 1
-    return @inbounds @atomic h.counts[i]
+    if !auto_resize(h)
+        active = @atomic h.counts
+        @boundscheck checkbounds(active, i)
+        return @inbounds @atomic active[i]
+    end
+
+    reader_lock(h.resize_phaser)
+    try
+        active = @atomic h.counts
+        @boundscheck checkbounds(active, i)
+        value = @inbounds @atomic active[i]
+        inactive = h.inactive_counts
+        if inactive !== nothing && i <= length(inactive)
+            value += @inbounds @atomic inactive[i]
+        end
+        return value
+    finally
+        reader_unlock(h.resize_phaser)
+    end
 end
 
-@inline function counts_inc_direct!(h::ConcurrentHistogram, index, value)
+Base.@propagate_inbounds @inline function counts_inc_direct!(h::ConcurrentHistogram, index, value)
     i = index + 1
-    return @inbounds @atomic h.counts[i] += value
+    active = @atomic h.counts
+    @boundscheck checkbounds(active, i)
+    return @inbounds @atomic active[i] += value
 end
 
-@inline function counts_set_direct!(h::ConcurrentHistogram, index, value)
+Base.@propagate_inbounds @inline function counts_set_direct!(h::ConcurrentHistogram, index, value)
     i = index + 1
-    @inbounds @atomic h.counts[i] = value
+    active = @atomic h.counts
+    @boundscheck checkbounds(active, i)
+    @inbounds @atomic active[i] = value
 end
 
 @inline function update_min_max!(h::ConcurrentHistogram, value)
-    @atomic h.min_value min value
-    @atomic h.max_value max value
+    if value != 0 && value < (@atomic h.min_value)
+        @atomic h.min_value min value
+    end
+    if value > (@atomic h.max_value)
+        @atomic h.max_value max value
+    end
 end
 
 function resize!(h::ConcurrentHistogram{C}, highest_trackable_value) where {C}
-    lock(h.resize_lock)
+    reader_lock(h.resize_phaser)
     try
         if !(highest_trackable_value >= lowest_discernible_value(h) * 2)
             throw(ArgumentError("highest_trackable_value must be >= 2 * lowest_discernible_value"))
         end
         new_bucket_count = buckets_needed_to_cover_value(highest_trackable_value, sub_bucket_count(h), unit_magnitude(h))
         new_counts_len = (new_bucket_count + 1) * sub_bucket_half_count(h)
-        old_counts = counts(h)
-        old_len = counts_length(h)
-        new_counts = counts_init(ConcurrentHistogram{C}, new_counts_len)
-        for i in 1:old_len
-            @inbounds @atomic new_counts[i] = @atomic old_counts[i]
+        old_counts = @atomic h.counts
+        old_len = length(old_counts)
+        if new_counts_len <= old_len
+            return h
         end
-        counts!(h, new_counts)
+
+        new_counts = counts_init(ConcurrentHistogram{C}, new_counts_len)
+        h.inactive_counts = old_counts
+        @atomic h.counts = new_counts
+
+        # Writers capture the active array inside their critical section. Once
+        # the old phase drains, no writer can still be updating old_counts.
+        flip_phase(h.resize_phaser)
+
+        for i in 1:old_len
+            old_count = @inbounds @atomic old_counts[i]
+            old_count == 0 || (@inbounds @atomic new_counts[i] += old_count)
+        end
+        h.inactive_counts = nothing
         bucket_count!(h, new_bucket_count)
         highest_trackable_value!(h, highest_trackable_value)
+        return h
     finally
-        unlock(h.resize_lock)
+        reader_unlock(h.resize_phaser)
     end
 end
 
 @inline function record_value!(h::ConcurrentHistogram, value::Int64, count::Int64=1)
-    if auto_resize(h)
-        lock(h.resize_lock)
-        try
-            return Base.invoke(record_value!, Tuple{AbstractHistogram, Int64, Int64}, h, value, count)
-        finally
-            unlock(h.resize_lock)
-        end
+    if !auto_resize(h)
+        return Base.invoke(record_value!, Tuple{AbstractHistogram, Int64, Int64}, h, value, count)
     end
-    return Base.invoke(record_value!, Tuple{AbstractHistogram, Int64, Int64}, h, value, count)
+
+    value >= 0 || _throw_negative_value(value)
+    count > 0 || _throw_invalid_count(count)
+    index = counts_index_for(h, value)
+
+    while true
+        critical_value = writer_critical_section_enter(h.resize_phaser)
+        recorded = false
+        try
+            active = @atomic h.counts
+            if index < length(active)
+                normalised_index = normalize_index(index, normalizing_index_offset(h), length(active))
+                i = normalised_index + 1
+                @inbounds @atomic active[i] += count
+                total_count_inc!(h, count)
+                update_min_max!(h, value)
+                recorded = true
+            end
+        finally
+            writer_critical_section_exit(h.resize_phaser, critical_value)
+        end
+        recorded && return nothing
+        resize!(h, value)
+    end
 end
 
 @inline function record_corrected_value!(h::ConcurrentHistogram, value::Int64, expected_interval::Int64, count::Int64=1)
-    if auto_resize(h)
-        lock(h.resize_lock)
-        try
-            return Base.invoke(record_corrected_value!, Tuple{AbstractHistogram, Int64, Int64, Int64},
-                h, value, expected_interval, count)
-        finally
-            unlock(h.resize_lock)
-        end
-    end
     return Base.invoke(record_corrected_value!, Tuple{AbstractHistogram, Int64, Int64, Int64},
         h, value, expected_interval, count)
 end
@@ -238,6 +287,7 @@ end
         end_time_stamp!(h, 0)
         tag!(h, nothing)
         fill!(counts(h), zero(C))
+        h.inactive_counts = nothing
     end
 else
     function reset!(h::ConcurrentHistogram{C}) where {C}
@@ -247,8 +297,10 @@ else
         start_time_stamp!(h, typemax(Int64))
         end_time_stamp!(h, 0)
         tag!(h, nothing)
-        for i in 1:counts_length(h)
-            @atomic h.counts[i] = zero(C)
+        active = @atomic h.counts
+        for i in eachindex(active)
+            @atomic active[i] = zero(C)
         end
+        h.inactive_counts = nothing
     end
 end

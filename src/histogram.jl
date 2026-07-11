@@ -18,7 +18,7 @@ mutable struct Histogram{C} <: AbstractHistogram{C}
     tag::Union{Nothing,String}
     const auto_resize::Bool
     total_count::Int64
-    counts::Vector{C}
+    const counts::Vector{C}
 end
 
 lowest_discernible_value(h::Histogram) = h.lowest_discernible_value
@@ -69,8 +69,19 @@ total_count!(h::Histogram, value) = h.total_count = value
 total_count_inc!(h::Histogram, value) = h.total_count += value
 
 counts(h::Histogram) = h.counts
-counts!(h::Histogram, value) = h.counts = value
 counts_length(h::Histogram) = length(h.counts)
+
+function _add_direct!(h::Histogram, from::Histogram)
+    destination_counts = counts(h)
+    source_counts = counts(from)
+    observed_total = Int64(0)
+    @inbounds @simd for i in eachindex(destination_counts, source_counts)
+        count = source_counts[i]
+        destination_counts[i] += count
+        observed_total += Int64(count)
+    end
+    return _finish_direct_add!(h, from, observed_total)
+end
 
 """
     Histogram(C::Type{<:Signed}, lowest_discernible_value, highest_trackable_value, significant_figures)
@@ -85,7 +96,8 @@ Constructs a new histogram with the specified configuration.
 
 """
 function Histogram(C::Type{<:Signed}, lowest_discernible_value, highest_trackable_value, significant_figures)
-    return _init(Histogram{C}, lowest_discernible_value, highest_trackable_value, significant_figures, false)
+    return _init(Histogram{C}, Int64(lowest_discernible_value), Int64(highest_trackable_value),
+        Int64(significant_figures), false)
 end
 
 """
@@ -100,7 +112,8 @@ Constructs a new histogram with the specified configuration.
 
 """
 function Histogram(lowest_discernible_value, highest_trackable_value, significant_figures)
-    return _init(Histogram{Int64}, lowest_discernible_value, highest_trackable_value, significant_figures, false)
+    return _init(Histogram{Int64}, Int64(lowest_discernible_value), Int64(highest_trackable_value),
+        Int64(significant_figures), false)
 end
 
 """
@@ -115,5 +128,5 @@ highestTrackableValue. Can auto-resize up to track values up to (typemax(Int64) 
 
 """
 function Histogram(significant_figures)
-    return _init(Histogram{Int64}, 1, 2, significant_figures, true)
+    return _init(Histogram{Int64}, 1, 2, Int64(significant_figures), true)
 end
