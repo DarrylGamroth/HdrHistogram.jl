@@ -300,6 +300,62 @@ end
         for i in 0:HdrHistogram.counts_length(stressed)-1) == expected_total
 end
 
+@testset "Parametric Counter Families" begin
+    for C in (Int16, Int32, Int64)
+        for histogram in (
+            HdrHistogram.Histogram(C, 1, 1_000_000, 3),
+            HdrHistogram.AtomicHistogram(C, 1, 1_000_000, 3),
+            HdrHistogram.ConcurrentHistogram(C, 1, 1_000_000, 3),
+            HdrHistogram.SynchronizedHistogram(C, 1, 1_000_000, 3),
+        )
+            HdrHistogram.record_value!(histogram, 42)
+            HdrHistogram.record_value!(histogram, 42, 2)
+            @test HdrHistogram.total_count(histogram) == 3
+            @test HdrHistogram.count_at_value(histogram, 42) == 3
+        end
+
+        for histogram in (
+            HdrHistogram.Histogram(C, 3),
+            HdrHistogram.ConcurrentHistogram(C, 3),
+            HdrHistogram.SynchronizedHistogram(C, 3),
+        )
+            HdrHistogram.record_value!(histogram, 1_000_000)
+            @test HdrHistogram.total_count(histogram) == 1
+            @test HdrHistogram.highest_trackable_value(histogram) >= 1_000_000
+        end
+    end
+
+    for constructor in (HdrHistogram.AtomicHistogram, HdrHistogram.ConcurrentHistogram)
+        histogram = constructor(Int16, 1, 1000, 2)
+        HdrHistogram.record_value!(histogram, 10, Int64(typemax(Int16)))
+        @test_throws OverflowError HdrHistogram.record_value!(histogram, 10)
+        @test HdrHistogram.count_at_value(histogram, 10) == typemax(Int16)
+        @test HdrHistogram.total_count(histogram) == typemax(Int16)
+    end
+
+    for constructor in (HdrHistogram.AtomicHistogram, HdrHistogram.ConcurrentHistogram)
+        histogram = constructor(Int32, 1, 1000, 2)
+        writer_count = max(2, Threads.nthreads())
+        records_per_writer = 2000
+        writers = [Threads.@spawn begin
+            for _ in 1:records_per_writer
+                HdrHistogram.record_value!(histogram, 10)
+            end
+        end for _ in 1:writer_count]
+        foreach(fetch, writers)
+        @test HdrHistogram.count_at_value(histogram, 10) == records_per_writer * writer_count
+        @test HdrHistogram.total_count(histogram) == records_per_writer * writer_count
+    end
+
+    recorder = HdrHistogram.Recorder(HdrHistogram.AtomicHistogram(Int16, 1, 1000, 2))
+    HdrHistogram.record_value!(recorder, 10)
+    @test HdrHistogram.count_at_value(HdrHistogram.interval_histogram(recorder), 10) == 1
+
+    single = HdrHistogram.SingleWriterRecorder(HdrHistogram.Histogram(Int32, 1, 1000, 2))
+    HdrHistogram.record_value!(single, 20)
+    @test HdrHistogram.count_at_value(HdrHistogram.interval_histogram(single), 20) == 1
+end
+
 @testset "Synchronized Histogram" begin
     h = HdrHistogram.SynchronizedHistogram(1, 1000, 2)
     HdrHistogram.record_value!(h, 10)
@@ -372,6 +428,55 @@ end
     HdrHistogram.record_corrected_value!(r, 10_000, 1000)
     interval2 = HdrHistogram.interval_histogram(r, interval)
     @test HdrHistogram.total_count(interval2) > 1
+end
+
+@testset "Recorder Concurrent Sampling" begin
+    recorder = HdrHistogram.Recorder(1, 1_000_000, 3)
+    writer_count = max(2, Threads.nthreads())
+    records_per_writer = 5000
+    writers = [Threads.@spawn begin
+        for i in 1:records_per_writer
+            HdrHistogram.record_value!(recorder, mod1(i + writer, 1000))
+            i % 100 == 0 && yield()
+        end
+    end for writer in 1:writer_count]
+
+    sampled = 0
+    recycle = nothing
+    while !all(istaskdone, writers)
+        interval = recycle === nothing ? HdrHistogram.interval_histogram(recorder) :
+                   HdrHistogram.interval_histogram(recorder, recycle)
+        sampled += HdrHistogram.total_count(interval)
+        recycle = interval
+        yield()
+    end
+    foreach(fetch, writers)
+    interval = recycle === nothing ? HdrHistogram.interval_histogram(recorder) :
+               HdrHistogram.interval_histogram(recorder, recycle)
+    sampled += HdrHistogram.total_count(interval)
+    @test sampled == records_per_writer * writer_count
+
+    single = HdrHistogram.SingleWriterRecorder(1, 1_000_000, 3)
+    writer = Threads.@spawn begin
+        for i in 1:10_000
+            HdrHistogram.record_value!(single, mod1(i, 1000))
+            i % 100 == 0 && yield()
+        end
+    end
+    sampled = 0
+    recycle = nothing
+    while !istaskdone(writer)
+        interval = recycle === nothing ? HdrHistogram.interval_histogram(single) :
+                   HdrHistogram.interval_histogram(single, recycle)
+        sampled += HdrHistogram.total_count(interval)
+        recycle = interval
+        yield()
+    end
+    fetch(writer)
+    interval = recycle === nothing ? HdrHistogram.interval_histogram(single) :
+               HdrHistogram.interval_histogram(single, recycle)
+    sampled += HdrHistogram.total_count(interval)
+    @test sampled == 10_000
 end
 
 @testset "Encoding Roundtrip" begin
@@ -617,6 +722,15 @@ end
     @test @allocated(HdrHistogram.record_value!(concurrent, 10)) == 0
     @test @allocated(HdrHistogram.record_value!(recorder, 10)) == 0
     @test @allocated(HdrHistogram.record_value!(single, 10)) == 0
+
+    narrow_atomic = HdrHistogram.AtomicHistogram(Int16, 1, 1000, 2)
+    narrow_concurrent = HdrHistogram.ConcurrentHistogram(Int32, 1, 1000, 2)
+    @test @allocated(HdrHistogram.record_value!(narrow_atomic, 10)) == 0
+    @test @allocated(HdrHistogram.record_value!(narrow_concurrent, 10)) == 0
+
+    auto = HdrHistogram.ConcurrentHistogram(2)
+    HdrHistogram.record_value!(auto, 1000)
+    @test @allocated(HdrHistogram.record_value!(auto, 10)) == 0
 end
 
 @testset "No Alloc Direct Queries and Merge" begin

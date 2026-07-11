@@ -1,6 +1,10 @@
-const _SYNCHRONIZED_HISTOGRAM_ID = Threads.Atomic{UInt64}(0)
+mutable struct SynchronizedHistogramIdSequence
+    @atomic value::UInt64
+end
 
-@inline _next_synchronized_histogram_id() = Threads.atomic_add!(_SYNCHRONIZED_HISTOGRAM_ID, UInt64(1))
+const _SYNCHRONIZED_HISTOGRAM_ID = SynchronizedHistogramIdSequence(0)
+
+@inline _next_synchronized_histogram_id() = (@atomic _SYNCHRONIZED_HISTOGRAM_ID.value += UInt64(1)) - UInt64(1)
 
 mutable struct SynchronizedHistogram{C} <: AbstractHistogram{C}
     const inner::Histogram{C}
@@ -37,6 +41,11 @@ highestTrackableValue. Can auto-resize up to track values up to (typemax(Int64) 
 function SynchronizedHistogram(significant_figures)
     inner = Histogram(significant_figures)
     return SynchronizedHistogram{Int64}(inner, ReentrantLock(), _next_synchronized_histogram_id())
+end
+
+function SynchronizedHistogram(C::Type{<:Signed}, significant_figures)
+    inner = Histogram(C, significant_figures)
+    return SynchronizedHistogram{C}(inner, ReentrantLock(), _next_synchronized_histogram_id())
 end
 
 function _init_with_config(::Type{SynchronizedHistogram{C}},

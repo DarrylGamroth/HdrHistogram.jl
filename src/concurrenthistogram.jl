@@ -116,6 +116,10 @@ function ConcurrentHistogram(significant_figures)
     return _init(ConcurrentHistogram{Int64}, 1, 2, Int64(significant_figures), true)
 end
 
+function ConcurrentHistogram(C::Type{<:Signed}, significant_figures)
+    return _init(ConcurrentHistogram{C}, 1, 2, Int64(significant_figures), true)
+end
+
 function _init_with_config(::Type{ConcurrentHistogram{C}},
     lowest_discernible_value::Int64,
     highest_trackable_value::Int64,
@@ -185,18 +189,19 @@ Base.@propagate_inbounds @inline function counts_get_direct(h::ConcurrentHistogr
     end
 end
 
-Base.@propagate_inbounds @inline function counts_inc_direct!(h::ConcurrentHistogram, index, value)
+Base.@propagate_inbounds @inline function counts_inc_direct!(h::ConcurrentHistogram{C}, index, value) where {C}
     i = index + 1
     active = @atomic h.counts
     @boundscheck checkbounds(active, i)
-    return @inbounds @atomic active[i] += value
+    increment = convert(C, value)
+    return @inbounds _atomic_add_count!(active, i, increment)
 end
 
-Base.@propagate_inbounds @inline function counts_set_direct!(h::ConcurrentHistogram, index, value)
+Base.@propagate_inbounds @inline function counts_set_direct!(h::ConcurrentHistogram{C}, index, value) where {C}
     i = index + 1
     active = @atomic h.counts
     @boundscheck checkbounds(active, i)
-    @inbounds @atomic active[i] = value
+    @inbounds @atomic active[i] = convert(C, value)
 end
 
 @inline function update_min_max!(h::ConcurrentHistogram, value)
@@ -243,13 +248,35 @@ function resize!(h::ConcurrentHistogram{C}, highest_trackable_value) where {C}
     end
 end
 
-@inline function record_value!(h::ConcurrentHistogram, value::Int64, count::Int64=1)
-    if !auto_resize(h)
-        return Base.invoke(record_value!, Tuple{AbstractHistogram, Int64, Int64}, h, value, count)
-    end
-
+@inline function _record_auto_value!(h::ConcurrentHistogram{Int64}, value::Int64, count::Int64)
     value >= 0 || _throw_negative_value(value)
     count > 0 || _throw_invalid_count(count)
+    index = counts_index_for(h, value)
+
+    # Validation is complete before entering the writer phase, and Int64 count
+    # updates cannot throw. Keep the common in-range path free of exception
+    # handling so Julia can inline the histogram update into the recording loop.
+    while true
+        critical_value = writer_critical_section_enter(h.resize_phaser)
+        active = @atomic h.counts
+        if index < length(active)
+            normalised_index = normalize_index(index, normalizing_index_offset(h), length(active))
+            i = normalised_index + 1
+            @inbounds @atomic active[i] += count
+            total_count_inc!(h, count)
+            update_min_max!(h, value)
+            writer_critical_section_exit(h.resize_phaser, critical_value)
+            return nothing
+        end
+        writer_critical_section_exit(h.resize_phaser, critical_value)
+        resize!(h, value)
+    end
+end
+
+@inline function _record_auto_value!(h::ConcurrentHistogram{C}, value::Int64, count::Int64) where {C}
+    value >= 0 || _throw_negative_value(value)
+    count > 0 || _throw_invalid_count(count)
+    increment = convert(C, count)
     index = counts_index_for(h, value)
 
     while true
@@ -260,7 +287,7 @@ end
             if index < length(active)
                 normalised_index = normalize_index(index, normalizing_index_offset(h), length(active))
                 i = normalised_index + 1
-                @inbounds @atomic active[i] += count
+                @inbounds _atomic_add_count!(active, i, increment)
                 total_count_inc!(h, count)
                 update_min_max!(h, value)
                 recorded = true
@@ -271,6 +298,13 @@ end
         recorded && return nothing
         resize!(h, value)
     end
+end
+
+@inline function record_value!(h::ConcurrentHistogram, value::Int64, count::Int64=1)
+    if !auto_resize(h)
+        return Base.invoke(record_value!, Tuple{AbstractHistogram, Int64, Int64}, h, value, count)
+    end
+    return _record_auto_value!(h, value, count)
 end
 
 @inline function record_corrected_value!(h::ConcurrentHistogram, value::Int64, expected_interval::Int64, count::Int64=1)

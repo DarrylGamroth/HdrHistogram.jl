@@ -130,3 +130,7 @@ highestTrackableValue. Can auto-resize up to track values up to (typemax(Int64) 
 function Histogram(significant_figures)
     return _init(Histogram{Int64}, 1, 2, Int64(significant_figures), true)
 end
+
+function Histogram(C::Type{<:Signed}, significant_figures)
+    return _init(Histogram{C}, 1, 2, Int64(significant_figures), true)
+end

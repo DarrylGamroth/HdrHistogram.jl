@@ -1,7 +1,11 @@
-const _RECORDER_INSTANCE_ID = Threads.Atomic{Int64}(0)
+mutable struct RecorderInstanceIdSequence
+    @atomic value::Int64
+end
+
+const _RECORDER_INSTANCE_ID = RecorderInstanceIdSequence(0)
 
 @inline function _next_recorder_id()
-    return Threads.atomic_add!(_RECORDER_INSTANCE_ID, 1)
+    return (@atomic _RECORDER_INSTANCE_ID.value += Int64(1)) - Int64(1)
 end
 
 @inline function _now_msec()
@@ -49,7 +53,7 @@ SingleWriterRecorder(number_of_significant_value_digits) = SingleWriterRecorder(
 SingleWriterRecorder(lowest_discernible_value, highest_trackable_value, significant_figures) =
     SingleWriterRecorder(Histogram(lowest_discernible_value, highest_trackable_value, significant_figures))
 
-@inline function record_value!(r::Recorder, value::Int64, count::Int64=1)
+@inline function _record_value_with_phase!(r::Recorder, value::Int64, count::Int64)
     r.serialize_writers && lock(r.writer_lock)
     val = writer_critical_section_enter(r.phaser)
     try
@@ -58,6 +62,51 @@ SingleWriterRecorder(lowest_discernible_value, highest_trackable_value, signific
         writer_critical_section_exit(r.phaser, val)
         r.serialize_writers && unlock(r.writer_lock)
     end
+end
+
+@inline record_value!(r::Recorder, value::Int64, count::Int64=1) =
+    _record_value_with_phase!(r, value, count)
+
+@inline function record_value!(r::Recorder{T}, value::Int64, count::Int64=1) where {T<:AtomicHistogram{Int64}}
+    value >= 0 || _throw_negative_value(value)
+    count > 0 || _throw_invalid_count(count)
+
+    # All throwing validation happens before, or after exiting, the phase. The
+    # in-range Int64 update is non-throwing and can remain fully inlineable.
+    critical_value = writer_critical_section_enter(r.phaser)
+    active = @atomic r.active
+    index = counts_index_for(active, value)
+    if index < counts_length(active)
+        _record_value_at_index_unchecked!(active, value, index, count)
+        writer_critical_section_exit(r.phaser, critical_value)
+        return nothing
+    end
+
+    writer_critical_section_exit(r.phaser, critical_value)
+    return _throw_value_out_of_range(value)
+end
+
+@inline function record_value!(r::Recorder{T}, value::Int64, count::Int64=1) where {T<:ConcurrentHistogram{Int64}}
+    value >= 0 || _throw_negative_value(value)
+    count > 0 || _throw_invalid_count(count)
+    auto_resize((@atomic r.active)) && return _record_value_with_phase!(r, value, count)
+
+    critical_value = writer_critical_section_enter(r.phaser)
+    active = @atomic r.active
+    if auto_resize(active)
+        writer_critical_section_exit(r.phaser, critical_value)
+        return _record_value_with_phase!(r, value, count)
+    end
+
+    index = counts_index_for(active, value)
+    if index < counts_length(active)
+        _record_value_at_index_unchecked!(active, value, index, count)
+        writer_critical_section_exit(r.phaser, critical_value)
+        return nothing
+    end
+
+    writer_critical_section_exit(r.phaser, critical_value)
+    return _throw_value_out_of_range(value)
 end
 
 @inline function record_corrected_value!(r::Recorder, value::Int64, expected_interval::Int64, count::Int64=1)
@@ -92,7 +141,7 @@ function record_values!(r::SingleWriterRecorder, values)
         record_values!(r.active, values)
         return r
     finally
-        writer_critical_section_exit(r.phaser, val)
+        single_writer_critical_section_exit(r.phaser, val)
     end
 end
 
@@ -106,13 +155,35 @@ Base.append!(r::Union{Recorder,SingleWriterRecorder}, values) = record_values!(r
     expected_interval::Integer, count::Integer=1) =
     record_corrected_value!(r, Int64(value), Int64(expected_interval), Int64(count))
 
-@inline function record_value!(r::SingleWriterRecorder, value::Int64, count::Int64=1)
+@inline function _record_value_with_phase!(r::SingleWriterRecorder, value::Int64, count::Int64)
     val = writer_critical_section_enter(r.phaser)
     try
         record_value!(r.active, value, count)
     finally
-        writer_critical_section_exit(r.phaser, val)
+        single_writer_critical_section_exit(r.phaser, val)
     end
+end
+
+
+@inline record_value!(r::SingleWriterRecorder, value::Int64, count::Int64=1) =
+    _record_value_with_phase!(r, value, count)
+
+@inline function record_value!(r::SingleWriterRecorder{T}, value::Int64, count::Int64=1) where {T<:AbstractHistogram{Int64}}
+    value >= 0 || _throw_negative_value(value)
+    count > 0 || _throw_invalid_count(count)
+
+    critical_value = writer_critical_section_enter(r.phaser)
+    active = r.active
+    index = counts_index_for(active, value)
+    if index < counts_length(active)
+        _record_value_at_index_unchecked!(active, value, index, count)
+        single_writer_critical_section_exit(r.phaser, critical_value)
+        return nothing
+    end
+
+    single_writer_critical_section_exit(r.phaser, critical_value)
+    auto_resize(active) && return _record_value_with_phase!(r, value, count)
+    return _throw_value_out_of_range(value)
 end
 
 @inline function record_corrected_value!(r::SingleWriterRecorder, value::Int64, expected_interval::Int64, count::Int64=1)
@@ -120,7 +191,7 @@ end
     try
         record_corrected_value!(r.active, value, expected_interval, count)
     finally
-        writer_critical_section_exit(r.phaser, val)
+        single_writer_critical_section_exit(r.phaser, val)
     end
 end
 

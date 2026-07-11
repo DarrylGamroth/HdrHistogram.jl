@@ -287,6 +287,12 @@ end
 @noinline _throw_invalid_count(count) = throw(ArgumentError("count $count must be > 0"))
 @noinline _throw_value_out_of_range(value) = throw(ArgumentError("value $value outside of histogram range"))
 
+@inline function _record_value_at_index_unchecked!(h::AbstractHistogram, value::Int64, index, count::Int64)
+    @inbounds counts_inc_normalised!(h, index, count)
+    update_min_max!(h, value)
+    return nothing
+end
+
 @inline function record_value!(h::AbstractHistogram, value::Int64, count::Int64=1)
     value >= 0 || _throw_negative_value(value)
     count > 0 || _throw_invalid_count(count)
@@ -300,8 +306,7 @@ end
         end
     end
 
-    @inbounds counts_inc_normalised!(h, index, count)
-    update_min_max!(h, value)
+    _record_value_at_index_unchecked!(h, value, index, count)
 end
 
 @inline record_value!(h::AbstractHistogram, value::Integer, count::Integer=1) =

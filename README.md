@@ -9,10 +9,10 @@ HdrHistogram
 This port contains a subset of the functionality supported by the Java
 implementation.  The current supported features are:
 
-* Standard histogram with parametric count size (64 bit counts default)
-* Atomic histograms
-* Concurrent histograms (concurrent recording; queries are not synchronized)
-* Synchronized histograms (recording/query methods are locked)
+* Histograms with parametric count size (`Int64`, `Int32`, and `Int16`; 64 bit counts default)
+* Atomic histograms with parametric count size
+* Concurrent histograms with parametric count size (concurrent recording; queries are not synchronized)
+* Synchronized histograms with parametric count size (recording/query methods are locked)
 * All iterator types (all values, recorded, percentiles, linear, logarithmic)
 * Auto-resizing of histograms
 * Reader/writer phaser and interval recorders
@@ -36,6 +36,7 @@ Features unlikely to be implemented:
 * Ordinary `for` iteration is allocation-free and yields immutable iteration values that are safe to retain.
 * For `SynchronizedHistogram`, keep iterators and multi-step reads inside `lock(h) do ... end` blocks.
 * `ConcurrentHistogram` auto-resize uses a writer phaser: ordinary inserts do not take the resize lock, while a resize still allocates and merges storage.
+* Narrow atomic counters use checked updates and throw `OverflowError` rather than wrapping through negative counts.
 * `mean`, `stddev`, `value_at_percentile`, and compatible-layout `add` use direct count-array kernels and do not require iterator state.
 * `push!`, `append!`, and `record_values!` provide idiomatic scalar and bulk recording APIs.
 * `EncodingWorkspace` and the `encode_into_*_byte_buffer!` methods reuse encoding storage.

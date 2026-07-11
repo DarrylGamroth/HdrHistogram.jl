@@ -10,14 +10,27 @@ mutable struct WriterReaderPhaser
 end
 
 @inline function writer_critical_section_enter(phaser::WriterReaderPhaser)
-    (@atomic phaser.start_epoch += 1) - 1
+    (@atomic :acquire phaser.start_epoch += 1) - 1
 end
 
 @inline function writer_critical_section_exit(phaser::WriterReaderPhaser, critical_value_at_enter)
     if critical_value_at_enter < 0
-        @atomic phaser.odd_end_epoch += 1
+        @atomic :release phaser.odd_end_epoch += 1
     else
-        @atomic phaser.even_end_epoch += 1
+        @atomic :release phaser.even_end_epoch += 1
+    end
+end
+
+@inline function single_writer_critical_section_exit(phaser::WriterReaderPhaser, critical_value_at_enter)
+    # With exactly one writer, the reader only observes the current end epoch;
+    # it never writes it until the phase has drained. A release store therefore
+    # avoids an unnecessary read-modify-write operation.
+    if critical_value_at_enter < 0
+        current = @atomic :monotonic phaser.odd_end_epoch
+        @atomic :release phaser.odd_end_epoch = current + 1
+    else
+        current = @atomic :monotonic phaser.even_end_epoch
+        @atomic :release phaser.even_end_epoch = current + 1
     end
 end
 

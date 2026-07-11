@@ -1,8 +1,24 @@
 @static if VERSION < v"1.12"
-    using Atomix: @atomic
+    using Atomix: @atomic, @atomicreplace
     const AtomicCounts{C} = Vector{C}
 else
     const AtomicCounts{C} = Base.AtomicMemory{C}
+end
+
+Base.@propagate_inbounds @inline function _atomic_add_count!(counts::AtomicCounts{C}, i, increment::C) where {C}
+    # Java's long-count histogram permits Int64 wrapping. Narrow Java counters
+    # reject overflow, so use a checked CAS loop for the parametric equivalents.
+    if C === Int64
+        return @inbounds @atomic counts[i] += increment
+    end
+
+    current = @inbounds @atomic counts[i]
+    while true
+        updated = Base.Checked.checked_add(current, increment)
+        result = @inbounds @atomicreplace counts[i] current => updated
+        result.success && return updated
+        current = result.old
+    end
 end
 
 mutable struct AtomicHistogram{C} <: AbstractHistogram{C}
@@ -127,16 +143,17 @@ Base.@propagate_inbounds @inline function counts_get_direct(h::AtomicHistogram, 
     return @inbounds @atomic h.counts[i]
 end
 
-Base.@propagate_inbounds @inline function counts_inc_direct!(h::AtomicHistogram, index, value)
+Base.@propagate_inbounds @inline function counts_inc_direct!(h::AtomicHistogram{C}, index, value) where {C}
     i = index + 1
     @boundscheck checkbounds(h.counts, i)
-    return @inbounds @atomic h.counts[i] += value
+    increment = convert(C, value)
+    return @inbounds _atomic_add_count!(h.counts, i, increment)
 end
 
-Base.@propagate_inbounds @inline function counts_set_direct!(h::AtomicHistogram, index, value)
+Base.@propagate_inbounds @inline function counts_set_direct!(h::AtomicHistogram{C}, index, value) where {C}
     i = index + 1
     @boundscheck checkbounds(h.counts, i)
-    @inbounds @atomic h.counts[i] = value
+    @inbounds @atomic h.counts[i] = convert(C, value)
 end
 
 @inline function update_min_max!(h::AtomicHistogram, value)
