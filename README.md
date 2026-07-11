@@ -158,3 +158,9 @@ new_interval = HdrHistogram.interval_histogram(
     recorder,       # Recorder to read from 
     interval)       # Histogram to recycle    
 ```
+
+# License
+
+HdrHistogram.jl is licensed under the [MIT License](LICENSE), copyright
+Rubus Technologies Inc. See [THIRD_PARTY_NOTICE.md](THIRD_PARTY_NOTICE.md) for
+the provenance and licensing of the original HdrHistogram implementation.
