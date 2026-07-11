@@ -1,6 +1,6 @@
 name = "HdrHistogram"
 uuid = "d0b8ac25-3072-4075-acf5-4a93ba78f71f"
-version = "0.3.2"
+version = "0.4.0"
 authors = ["Darryl Gamroth <dgamroth@rubus.ca>"]
 
 [deps]
@@ -19,7 +19,7 @@ Base64 = "1"
 CodecZlib = "0.7"
 Printf = "1"
 Test = "1"
-julia = "1.9"
+julia = "1.10"
 Plots = "1.41.3"
 
 [extras]

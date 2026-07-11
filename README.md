@@ -7,6 +7,9 @@ HdrHistogram.jl: Julia port of High Dynamic Range (HDR) Histogram
 HdrHistogram
 ----------------------------------------------
 
+HdrHistogram.jl requires Julia 1.10 or later.
+See [CHANGELOG.md](CHANGELOG.md) for release notes.
+
 This port contains a subset of the functionality supported by the Java
 implementation.  The current supported features are:
 
