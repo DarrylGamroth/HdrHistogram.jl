@@ -2,6 +2,7 @@ HdrHistogram.jl: Julia port of High Dynamic Range (HDR) Histogram
 
 [![CI](https://github.com/DarrylGamroth/HdrHistogram.jl/actions/workflows/ci.yml/badge.svg)](https://github.com/DarrylGamroth/HdrHistogram.jl/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/DarrylGamroth/HdrHistogram.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/DarrylGamroth/HdrHistogram.jl)
+[![Aqua QA](https://juliatesting.github.io/Aqua.jl/dev/assets/badge.svg)](https://github.com/JuliaTesting/Aqua.jl)
 
 HdrHistogram
 ----------------------------------------------

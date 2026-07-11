@@ -2,6 +2,8 @@ using Test
 using Base64
 using HdrHistogram
 
+include("aqua.jl")
+
 const LOWEST = 1
 const HIGHEST = 60 * 60 * 1000 * 1000 # e.g. for 1 hr in usec units
 const SIGNIFICANT = 3
