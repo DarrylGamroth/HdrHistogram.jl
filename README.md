@@ -1,7 +1,7 @@
 HdrHistogram.jl: Julia port of High Dynamic Range (HDR) Histogram
 
-[![CI](https://github.com/New-Earth-Lab/HdrHistogram.jl/actions/workflows/ci.yml/badge.svg)](https://github.com/New-Earth-Lab/HdrHistogram.jl/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/New-Earth-Lab/HdrHistogram.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/New-Earth-Lab/HdrHistogram.jl)
+[![CI](https://github.com/DarrylGamroth/HdrHistogram.jl/actions/workflows/ci.yml/badge.svg)](https://github.com/DarrylGamroth/HdrHistogram.jl/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/DarrylGamroth/HdrHistogram.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/DarrylGamroth/HdrHistogram.jl)
 
 HdrHistogram
 ----------------------------------------------
