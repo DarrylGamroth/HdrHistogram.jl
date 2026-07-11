@@ -18,6 +18,8 @@ jobs:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    env:
+      HDRHISTOGRAM_JAVA_DIR: ${{ github.workspace }}/HdrHistogram-java
     permissions:
       actions: write
       contents: read
@@ -26,7 +28,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        version: ['lts', '1', 'nightly']
+        version: ['1.10', '1', 'nightly']
         arch: [x64, aarch64]
         exclude:
           - os: ubuntu-latest
@@ -39,6 +41,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 2
+      - name: Checkout Java reference implementation
+        uses: actions/checkout@v4
+        with:
+          repository: HdrHistogram/HdrHistogram
+          ref: de84b0a7de2378abfc405da503bf4898e84ea98e
+          path: HdrHistogram-java
       - uses: julia-actions/setup-julia@v2
         with:
           version: ${{ matrix.version }}
@@ -47,8 +55,6 @@ jobs:
         with:
           distribution: 'zulu'
           java-version: '17'
-      - name: Install Atomix for Julia < 1.12
-        run: julia -e 'if VERSION < v"1.12"; using Pkg; Pkg.add("Atomix"); end'
       - uses: julia-actions/cache@v2
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1

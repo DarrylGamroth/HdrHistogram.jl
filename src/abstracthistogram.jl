@@ -136,10 +136,25 @@ Base.@propagate_inbounds @inline function counts_get_normalised(h::AbstractHisto
     return counts_get_direct(h, normalize_index(h, index))
 end
 
-Base.@propagate_inbounds @inline function counts_inc_direct!(h::AbstractHistogram, index, value)
+@noinline function _throw_count_overflow(::Type{C}, current, increment) where {C}
+    throw(OverflowError("$C histogram count overflow: $current + $increment"))
+end
+
+@inline function _checked_add_count(current::C, increment) where {C}
+    (typemin(C) <= increment <= typemax(C)) || _throw_count_overflow(C, current, increment)
+    return Base.Checked.checked_add(current, convert(C, increment))
+end
+
+Base.@propagate_inbounds @inline function counts_inc_direct!(h::AbstractHistogram{C}, index, value) where {C}
     i = index + 1
     @boundscheck checkbounds(counts(h), i)
-    return @inbounds counts(h)[i] += value
+    if C === Int64
+        return @inbounds counts(h)[i] += value
+    end
+    current = @inbounds counts(h)[i]
+    updated = _checked_add_count(current, value)
+    @inbounds counts(h)[i] = updated
+    return updated
 end
 
 Base.@propagate_inbounds @inline function counts_inc_normalised!(h::AbstractHistogram, index, value)

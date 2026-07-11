@@ -531,12 +531,28 @@ end
         end
     end
 
-    for constructor in (HdrHistogram.AtomicHistogram, HdrHistogram.ConcurrentHistogram)
-        histogram = constructor(Int16, 1, 1000, 2)
-        HdrHistogram.record_value!(histogram, 10, Int64(typemax(Int16)))
-        @test_throws OverflowError HdrHistogram.record_value!(histogram, 10)
-        @test HdrHistogram.count_at_value(histogram, 10) == typemax(Int16)
-        @test HdrHistogram.total_count(histogram) == typemax(Int16)
+    for C in (Int16, Int32)
+        for constructor in (
+            HdrHistogram.Histogram,
+            HdrHistogram.AtomicHistogram,
+            HdrHistogram.ConcurrentHistogram,
+            HdrHistogram.SynchronizedHistogram,
+        )
+            limit = Int64(typemax(C))
+            histogram = constructor(C, 1, 1000, 2)
+            HdrHistogram.record_value!(histogram, 10, limit)
+            @test_throws OverflowError HdrHistogram.record_value!(histogram, 10)
+            @test HdrHistogram.count_at_value(histogram, 10) == limit
+            @test HdrHistogram.total_count(histogram) == limit
+
+            target = constructor(C, 1, 1000, 2)
+            source = constructor(C, 1, 1000, 2)
+            HdrHistogram.record_value!(target, 10, limit - 10)
+            HdrHistogram.record_value!(source, 10, 20)
+            @test_throws OverflowError HdrHistogram.add!(target, source)
+            @test HdrHistogram.count_at_value(target, 10) == limit - 10
+            @test HdrHistogram.total_count(target) == limit - 10
+        end
     end
 
     for constructor in (HdrHistogram.AtomicHistogram, HdrHistogram.ConcurrentHistogram)
@@ -763,7 +779,7 @@ end
 end
 
 @testset "Log Reader Java Sample" begin
-    path = "/home/dgamroth/workspaces/codex/HdrHistogram/src/test/resources/org/HdrHistogram/jHiccup-2.0.6.logV1.hlog"
+    path = joinpath(@__DIR__, "fixtures", "jHiccup-2.0.6.logV1.hlog")
     io = open(path, "r")
     reader = HdrHistogram.HistogramLogReader(io)
     decoded = HdrHistogram.next_interval_histogram(reader)
@@ -814,16 +830,24 @@ end
 @testset "Java Interop" begin
     javac = Sys.which("javac")
     java = Sys.which("java")
-    if javac === nothing || java === nothing
-        @test_skip "java/javac not available"
+    java_repo = get(ENV, "HDRHISTOGRAM_JAVA_DIR",
+        normpath(joinpath(@__DIR__, "..", "..", "HdrHistogram")))
+    java_src = joinpath(java_repo, "src", "main", "java")
+    if haskey(ENV, "HDRHISTOGRAM_JAVA_DIR")
+        @test javac !== nothing
+        @test java !== nothing
+        @test isdir(java_src)
+    end
+    if javac === nothing || java === nothing || !isdir(java_src)
+        @test_skip "java/javac or the Java HdrHistogram reference source is not available"
     else
-        java_repo = "/home/dgamroth/workspaces/codex/HdrHistogram"
-        java_src = joinpath(java_repo, "src", "main", "java")
         interop_src = joinpath(@__DIR__, "interop", "org", "HdrHistogram", "JavaInterop.java")
         mktempdir() do builddir
             interop_src_root = joinpath(@__DIR__, "interop")
-            run(`$javac -cp $java_src -sourcepath $(java_src):$(interop_src_root) -d $builddir $interop_src`)
-            classpath = string(builddir, ":", java_src)
+            classpath_separator = Sys.iswindows() ? ';' : ':'
+            sourcepath = string(java_src, classpath_separator, interop_src_root)
+            run(`$javac -cp $java_src -sourcepath $sourcepath -d $builddir $interop_src`)
+            classpath = string(builddir, classpath_separator, java_src)
 
             payload = readchomp(`$java -cp $classpath org.HdrHistogram.JavaInterop encode 1 1000000 3 1 2 3 10:4 1000:2`)
             decoded = HdrHistogram.decode_from_compressed_byte_buffer(base64decode(payload))

@@ -71,13 +71,25 @@ total_count_inc!(h::Histogram, value) = h.total_count += value
 counts(h::Histogram) = h.counts
 counts_length(h::Histogram) = length(h.counts)
 
-function _add_direct!(h::Histogram, from::Histogram)
+function _add_direct!(h::Histogram{Int64}, from::Histogram)
     destination_counts = counts(h)
     source_counts = counts(from)
     observed_total = Int64(0)
     @inbounds @simd for i in eachindex(destination_counts, source_counts)
         count = source_counts[i]
         destination_counts[i] += count
+        observed_total += Int64(count)
+    end
+    return _finish_direct_add!(h, from, observed_total)
+end
+
+function _add_direct!(h::Histogram{C}, from::Histogram) where {C}
+    destination_counts = counts(h)
+    source_counts = counts(from)
+    observed_total = Int64(0)
+    @inbounds for i in eachindex(destination_counts, source_counts)
+        count = source_counts[i]
+        destination_counts[i] = _checked_add_count(destination_counts[i], count)
         observed_total += Int64(count)
     end
     return _finish_direct_add!(h, from, observed_total)
