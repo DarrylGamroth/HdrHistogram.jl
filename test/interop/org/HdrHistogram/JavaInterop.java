@@ -110,6 +110,37 @@ public class JavaInterop {
             System.out.printf("%d,%d", total, p99);
             return;
         }
+        if ("features".equals(mode)) {
+            Histogram source = new Histogram(1, 1_000_000, 3);
+            source.recordValueWithCount(0, 2);
+            source.recordValueWithCount(10, 3);
+            source.recordValue(10_000);
+            source.setStartTimeStamp(100);
+            source.setEndTimeStamp(400);
+            source.setTag("source");
+
+            Histogram copied = source.copy();
+            Histogram largerCopy = new Histogram(1, 2_000_000, 3);
+            source.copyInto(largerCopy);
+            Histogram corrected = source.copyCorrectedForCoordinatedOmission(1_000);
+
+            Histogram remainder = source.copy();
+            Histogram removed = new Histogram(1, 1_000_000, 3);
+            removed.recordValue(0);
+            removed.recordValueWithCount(10, 2);
+            remainder.subtract(removed);
+
+            System.out.printf(
+                    "%b,%b,%d,%d,%b,%d,%d,%d,%d,%.17g,%d,%d,%d,%d",
+                    copied.equals(source), largerCopy.equals(source),
+                    copied.getStartTimeStamp(), copied.getEndTimeStamp(), copied.getTag() == null,
+                    corrected.getTotalCount(), corrected.getValueAtPercentile(99.0),
+                    source.getMinNonZeroValue(), source.getCountBetweenValues(0, 10),
+                    source.getPercentileAtOrBelowValue(10), remainder.getTotalCount(),
+                    remainder.getCountAtValue(0), remainder.getCountAtValue(10),
+                    remainder.getCountAtValue(10_000));
+            return;
+        }
         throw new IllegalArgumentException("unknown mode: " + mode);
     }
 }

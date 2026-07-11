@@ -77,7 +77,8 @@ Construct a new empty `T` instance with the same configuration as `h`.
 - A new instance of the same type as `h` with the same configuration.
 """
 function Base.similar(h::T) where {T<:AbstractHistogram}
-    return _init(T, lowest_discernible_value(h), highest_trackable_value(h), significant_figures(h), auto_resize(h))
+    return _init_with_config(T, lowest_discernible_value(h), highest_trackable_value(h),
+        significant_figures(h), auto_resize(h), conversion_ratio(h), normalizing_index_offset(h))
 end
 
 function reset!(h::AbstractHistogram{C}) where {C}
@@ -236,22 +237,8 @@ function median_equivalent_value(h::AbstractHistogram, value::Int64)
     return lowest_equivalent_value(h, value) + (size_of_equivalent_value_range(h, value) >> 1)
 end
 
-function reset_internal_counters!(h::AbstractHistogram{C}) where {C}
-    min_non_zero_index = -1
-    max_index = -1
-    observed_total_count = 0
-
-    # For compatability all indicies are 0-based
-    @inbounds for i in 0:counts_length(h)-1
-        if (count = counts_get_normalised(h, i)) > 0
-            observed_total_count += count
-            max_index = i
-            if min_non_zero_index == -1 && i != 0
-                min_non_zero_index = i
-            end
-        end
-    end
-
+@inline function _set_internal_counters_from_observed!(h::AbstractHistogram,
+    observed_total_count::Int64, min_non_zero_index::Int64, max_index::Int64)
     if max_index == -1
         max_value!(h, 0)
     else
@@ -266,6 +253,27 @@ function reset_internal_counters!(h::AbstractHistogram{C}) where {C}
     end
 
     total_count!(h, observed_total_count)
+    return h
+end
+
+function reset_internal_counters!(h::AbstractHistogram)
+    min_non_zero_index = Int64(-1)
+    max_index = Int64(-1)
+    observed_total_count = Int64(0)
+
+    # For compatibility all indices are 0-based.
+    @inbounds for i in 0:counts_length(h)-1
+        if (count = counts_get_normalised(h, i)) > 0
+            observed_total_count += Int64(count)
+            max_index = i
+            if min_non_zero_index == -1 && i != 0
+                min_non_zero_index = i
+            end
+        end
+    end
+
+    return _set_internal_counters_from_observed!(h, observed_total_count,
+        min_non_zero_index, max_index)
 end
 
 function buckets_needed_to_cover_value(value, sub_bucket_count, unit_magnitude)
@@ -430,6 +438,170 @@ function add_while_correcting_for_coordinated_omission(h::AbstractHistogram, fro
     return h
 end
 
+"""
+    copyto!(target::AbstractHistogram, source::AbstractHistogram)
+
+Replace `target`'s recorded counts with `source`'s counts. The destination keeps
+its immutable layout configuration, while the source timestamps are copied and
+the destination tag is cleared, matching Java's `copyInto` behavior.
+"""
+function Base.copyto!(target::AbstractHistogram, source::AbstractHistogram)
+    target === source && return target
+    reset!(target)
+    add!(target, source)
+    start_time_stamp!(target, start_time_stamp(source))
+    end_time_stamp!(target, end_time_stamp(source))
+    return target
+end
+
+"""Create an independent histogram with the same concrete type, configuration, and recorded data."""
+function Base.copy(source::T) where {T<:AbstractHistogram}
+    target = similar(source)
+    copyto!(target, source)
+    return target
+end
+
+"""
+    copy_corrected!(target, source, expected_interval)
+
+Replace `target` with a coordinated-omission-corrected copy of `source`.
+Distinct source and target histograms use no temporary histogram.
+"""
+function copy_corrected!(target::AbstractHistogram, source::AbstractHistogram,
+    expected_interval::Integer)
+    if target === source
+        snapshot = copy(source)
+        return copy_corrected!(target, snapshot, expected_interval)
+    end
+
+    reset!(target)
+    add_while_correcting_for_coordinated_omission(target, source, Int64(expected_interval))
+    start_time_stamp!(target, start_time_stamp(source))
+    end_time_stamp!(target, end_time_stamp(source))
+    return target
+end
+
+"""Create a coordinated-omission-corrected copy of `source`."""
+function copy_corrected(source::AbstractHistogram, expected_interval::Integer)
+    target = similar(source)
+    copy_corrected!(target, source, expected_interval)
+    return target
+end
+
+# Explicit aliases make the relationship to the Java API discoverable while
+# retaining compact Julia names for ordinary use.
+copy_corrected_for_coordinated_omission(source::AbstractHistogram, expected_interval::Integer) =
+    copy_corrected(source, expected_interval)
+copy_into_corrected_for_coordinated_omission!(target::AbstractHistogram,
+    source::AbstractHistogram, expected_interval::Integer) =
+    copy_corrected!(target, source, expected_interval)
+
+@noinline function _throw_subtract_out_of_range()
+    throw(ArgumentError("source histogram contains values outside of destination range"))
+end
+
+@noinline function _throw_subtract_count(value, source_count, destination_count)
+    throw(ArgumentError("source count $source_count at value $value exceeds destination count $destination_count"))
+end
+
+function _prepare_to_subtract!(h::AbstractHistogram, from::AbstractHistogram)
+    highest_recordable = highest_equivalent_value(h, value_at_index(h, counts_length(h) - 1))
+    source_max = max(from)
+    highest_equivalent_value(h, source_max) <= highest_recordable || _throw_subtract_out_of_range()
+    return nothing
+end
+
+function _clear_counts_preserving_metadata!(h::AbstractHistogram)
+    @inbounds for i in 0:counts_length(h)-1
+        counts_set_direct!(h, i, 0)
+    end
+    total_count!(h, 0)
+    min_value!(h, typemax(Int64))
+    max_value!(h, 0)
+    return h
+end
+
+function _subtract_direct!(h::AbstractHistogram, from::AbstractHistogram)
+    @inbounds for i in 0:counts_length(from)-1
+        source_count = Int64(counts_get_normalised(from, i))
+        destination_count = Int64(counts_get_normalised(h, i))
+        source_count <= 0 || source_count <= destination_count ||
+            _throw_subtract_count(value_at_index(from, i), source_count, destination_count)
+    end
+
+    observed_total_count = Int64(0)
+    min_non_zero_index = Int64(-1)
+    max_index = Int64(-1)
+    @inbounds for i in 0:counts_length(from)-1
+        source_count = Int64(counts_get_normalised(from, i))
+        remaining = source_count > 0 ?
+            Int64(counts_inc_direct!(h, normalize_index(h, i), -source_count)) :
+            Int64(counts_get_normalised(h, i))
+        if remaining > 0
+            observed_total_count += remaining
+            max_index = i
+            if min_non_zero_index == -1 && i != 0
+                min_non_zero_index = i
+            end
+        end
+    end
+    return _set_internal_counters_from_observed!(h, observed_total_count,
+        min_non_zero_index, max_index)
+end
+
+function _rollback_subtract_by_value!(h::AbstractHistogram, from::AbstractHistogram, stop_index::Int64)
+    @inbounds for i in 0:stop_index-1
+        source_count = Int64(counts_get_normalised(from, i))
+        if source_count > 0
+            destination_index = counts_index_for(h, value_at_index(from, i))
+            counts_inc_direct!(h, normalize_index(h, destination_index), source_count)
+        end
+    end
+    return nothing
+end
+
+function _subtract_by_value!(h::AbstractHistogram, from::AbstractHistogram)
+    @inbounds for i in 0:counts_length(from)-1
+        source_count = Int64(counts_get_normalised(from, i))
+        if source_count > 0
+            value = value_at_index(from, i)
+            destination_index = counts_index_for(h, value)
+            destination_count = Int64(counts_get_normalised(h, destination_index))
+            if source_count > destination_count
+                _rollback_subtract_by_value!(h, from, Int64(i))
+                _throw_subtract_count(value, source_count, destination_count)
+            end
+            counts_inc_direct!(h, normalize_index(h, destination_index), -source_count)
+        end
+    end
+    reset_internal_counters!(h)
+    return h
+end
+
+"""
+    subtract!(histogram, source)
+
+Subtract `source`'s recorded counts from `histogram` without changing timestamps
+or its immutable configuration. An `ArgumentError` is thrown if any source
+count cannot be removed.
+"""
+function subtract!(h::AbstractHistogram, from::AbstractHistogram)
+    if h === from
+        return _clear_counts_preserving_metadata!(h)
+    end
+
+    _prepare_to_subtract!(h, from)
+    if _direct_add_compatible(h, from)
+        _subtract_direct!(h, from)
+    else
+        _subtract_by_value!(h, from)
+    end
+    return h
+end
+
+"""Java-compatible alias for [`subtract!`](@ref)."""
+subtract(h::AbstractHistogram, from::AbstractHistogram) = subtract!(h, from)
+
 #### VALUES ####
 
 function Base.max(h::AbstractHistogram{C}) where {C}
@@ -454,6 +626,20 @@ function Base.min(h::AbstractHistogram{C}) where {C}
 
     return lowest_equivalent_value(h, min_value(h))
 end
+
+"""
+    min_nonzero(h::AbstractHistogram)
+
+Return the lowest recorded non-zero value at histogram resolution. As in the
+Java API, the result is `typemax(Int64)` when no non-zero value has been
+recorded.
+"""
+function min_nonzero(h::AbstractHistogram)
+    value = min_value(h)
+    return value == typemax(Int64) ? value : lowest_equivalent_value(h, value)
+end
+
+min_nonzero_value(h::AbstractHistogram) = min_nonzero(h)
 
 function count_at_percentile(h::AbstractHistogram, percentile::Real)
     # Truncate to 0..100%, and remove 1 unit of least precision to avoid roundoff overruns into next bucket when we
@@ -558,9 +744,99 @@ function count_at_value(h::AbstractHistogram, value::Int64)
     return @inbounds counts_get_normalised(h, index)
 end
 
+count_at_value(h::AbstractHistogram, value::Integer) = count_at_value(h, Int64(value))
+
+"""
+    percentile_at_or_below_value(h, value)
+
+Return the percentage of recorded values less than or equivalent to `value`.
+An empty histogram returns `100.0`, matching Java HdrHistogram.
+"""
+function percentile_at_or_below_value(h::AbstractHistogram, value::Integer)
+    value64 = Int64(value)
+    value64 >= 0 || _throw_negative_value(value64)
+    count_total = Int64(total_count(h))
+    count_total == 0 && return 100.0
+
+    target_index = min(counts_index_for(h, value64), counts_length(h) - 1)
+    cumulative_count = Int64(0)
+    @inbounds for i in 0:target_index
+        cumulative_count += Int64(counts_get_normalised(h, i))
+    end
+    return 100.0 * cumulative_count / count_total
+end
+
+"""
+    count_between_values(h, low_value, high_value)
+
+Return the count in the inclusive histogram-resolution range bounded by
+`low_value` and `high_value`.
+"""
+function count_between_values(h::AbstractHistogram, low_value::Integer, high_value::Integer)
+    low64 = Int64(low_value)
+    high64 = Int64(high_value)
+    low64 >= 0 || _throw_negative_value(low64)
+    high64 >= 0 || _throw_negative_value(high64)
+
+    low_index = max(0, counts_index_for(h, low64))
+    high_index = min(counts_index_for(h, high64), counts_length(h) - 1)
+    low_index > high_index && return Int64(0)
+
+    count = Int64(0)
+    @inbounds for i in low_index:high_index
+        count += Int64(counts_get_normalised(h, i))
+    end
+    return count
+end
+
 function count_at_index(h::AbstractHistogram, index::Int64)
     0 <= index < counts_length(h) || throw(BoundsError(counts(h), index + 1))
     return counts_get_normalised(h, index)
+end
+
+count_at_index(h::AbstractHistogram, index::Integer) = count_at_index(h, Int64(index))
+
+function Base.:(==)(left::AbstractHistogram, right::AbstractHistogram)
+    left === right && return true
+    lowest_discernible_value(left) == lowest_discernible_value(right) || return false
+    significant_figures(left) == significant_figures(right) || return false
+    conversion_ratio(left) == conversion_ratio(right) || return false
+    total_count(left) == total_count(right) || return false
+    max(left) == max(right) || return false
+    min_nonzero(left) == min_nonzero(right) || return false
+
+    left_length = counts_length(left)
+    right_length = counts_length(right)
+    common_length = min(left_length, right_length)
+    @inbounds for i in 0:common_length-1
+        counts_get_normalised(left, i) == counts_get_normalised(right, i) || return false
+    end
+    @inbounds for i in common_length:left_length-1
+        counts_get_normalised(left, i) == 0 || return false
+    end
+    @inbounds for i in common_length:right_length-1
+        counts_get_normalised(right, i) == 0 || return false
+    end
+    return true
+end
+
+function Base.hash(h::AbstractHistogram, seed::UInt)
+    value_hash = hash(:HdrHistogram, seed)
+    value_hash = hash(lowest_discernible_value(h), value_hash)
+    value_hash = hash(significant_figures(h), value_hash)
+    ratio = conversion_ratio(h)
+    value_hash = hash(ratio == 0.0 ? 0.0 : ratio, value_hash)
+    value_hash = hash(Int64(total_count(h)), value_hash)
+    value_hash = hash(max(h), value_hash)
+    value_hash = hash(min_nonzero(h), value_hash)
+    @inbounds for i in 0:counts_length(h)-1
+        count = Int64(counts_get_normalised(h, i))
+        if count != 0
+            value_hash = hash(i, value_hash)
+            value_hash = hash(count, value_hash)
+        end
+    end
+    return value_hash
 end
 
 function _index_at_cumulative_count(h::AbstractHistogram, target_count::Integer)

@@ -13,6 +13,9 @@ end
 report_benchmark("mean", @benchmark(HH.mean($hist)))
 report_benchmark("stddev", @benchmark(HH.stddev($hist)))
 report_benchmark("p99", @benchmark(HH.value_at_percentile($hist, 99.0)))
+report_benchmark("min non-zero", @benchmark(HH.min_nonzero($hist)))
+report_benchmark("count between", @benchmark(HH.count_between_values($hist, 100, 1_000)))
+report_benchmark("percentile at/below", @benchmark(HH.percentile_at_or_below_value($hist, 1_000)))
 
 percentiles = [50.0, 90.0, 99.0, 99.9]
 values = zeros(Int64, length(percentiles))
@@ -38,6 +41,19 @@ report_benchmark("percentile vector (cursor)",
 
 report_benchmark("same-layout add",
     @benchmark(HH.add(target, $hist), setup=(target=similar($hist)), evals=1))
+report_benchmark("same-layout copyto!",
+    @benchmark(copyto!(target, $hist), setup=(target=similar($hist)), evals=1))
+
+equal_hist = copy(hist)
+report_benchmark("semantic equality", @benchmark($hist == $equal_hist))
+report_benchmark("semantic hash", @benchmark(hash($hist)))
+
+removed = HH.Histogram(1, 1_000_000, 3)
+for value in 0:9_999
+    HH.record_value!(removed, value, 20)
+end
+report_benchmark("same-layout subtract!",
+    @benchmark(HH.subtract!(target, $removed), setup=(target=copy($hist)), evals=1))
 report_benchmark("add corrected",
     @benchmark(HH.add_while_correcting_for_coordinated_omission(target, $hist, 1000),
         setup=(target=similar($hist)), evals=1))

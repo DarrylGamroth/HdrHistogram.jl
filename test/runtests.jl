@@ -247,6 +247,210 @@ end
     @test HdrHistogram.total_count(too_small) == 0
 end
 
+@testset "Copy and Corrected Copy" begin
+    # Configuration matrix: every counter width crosses every concrete
+    # histogram variant for ordinary copy/copy-to behavior.
+    for C in (Int16, Int32, Int64)
+        for constructor in (
+            HdrHistogram.Histogram,
+            HdrHistogram.AtomicHistogram,
+            HdrHistogram.ConcurrentHistogram,
+            HdrHistogram.SynchronizedHistogram,
+        )
+            source = constructor(C, 1, 1_000_000, 3)
+            HdrHistogram.record_value!(source, 0, 2)
+            HdrHistogram.record_value!(source, 10, 3)
+            HdrHistogram.record_value!(source, 10_000)
+            HdrHistogram.start_time_stamp!(source, 100)
+            HdrHistogram.end_time_stamp!(source, 400)
+            HdrHistogram.tag!(source, "source")
+
+            copied = copy(source)
+            @test typeof(copied) === typeof(source)
+            @test copied == source
+            @test isequal(copied, source)
+            @test hash(copied) == hash(source)
+            @test copied !== source
+            @test HdrHistogram.start_time_stamp(copied) == 100
+            @test HdrHistogram.end_time_stamp(copied) == 400
+            @test HdrHistogram.tag(copied) === nothing
+
+            target = constructor(C, 1, 1_000_000, 3)
+            HdrHistogram.record_value!(target, 999)
+            HdrHistogram.tag!(target, "old-target")
+            @test copyto!(target, source) === target
+            @test target == source
+            @test HdrHistogram.count_at_value(target, 999) == 0
+            @test HdrHistogram.tag(target) === nothing
+            @test copyto!(target, target) === target
+        end
+    end
+
+    for constructor in (
+        HdrHistogram.Histogram,
+        HdrHistogram.ConcurrentHistogram,
+        HdrHistogram.SynchronizedHistogram,
+    )
+        source = constructor(Int32, 3)
+        HdrHistogram.record_value!(source, 10_000_000)
+        copied = copy(source)
+        @test copied == source
+        @test HdrHistogram.auto_resize(copied)
+        @test HdrHistogram.highest_trackable_value(copied) ==
+              HdrHistogram.highest_trackable_value(source)
+    end
+
+    configured = HdrHistogram._init_with_config(
+        HdrHistogram.Histogram{Int64}, 1, 1_000_000, 3, true, 0.5, 17)
+    HdrHistogram.record_value!(configured, 10, 3)
+    configured_copy = copy(configured)
+    @test configured_copy == configured
+    @test HdrHistogram.conversion_ratio(configured_copy) == 0.5
+    @test HdrHistogram.normalizing_index_offset(configured_copy) == 17
+    configured_removed = similar(configured)
+    HdrHistogram.record_value!(configured_removed, 10)
+    HdrHistogram.subtract!(configured_copy, configured_removed)
+    @test HdrHistogram.count_at_value(configured_copy, 10) == 2
+    @test HdrHistogram.min_nonzero(configured_copy) == 10
+
+    source = HdrHistogram.Histogram(Int32, 1, 1_000_000, 3)
+    HdrHistogram.record_value!(source, 10_000)
+    HdrHistogram.start_time_stamp!(source, 12)
+    HdrHistogram.end_time_stamp!(source, 34)
+    corrected = HdrHistogram.copy_corrected(source, 1_000)
+    @test HdrHistogram.total_count(corrected) == 10
+    @test HdrHistogram.start_time_stamp(corrected) == 12
+    @test HdrHistogram.end_time_stamp(corrected) == 34
+
+    target = similar(source)
+    @test HdrHistogram.copy_corrected!(target, source, 1_000) === target
+    @test target == corrected
+    alias_copy = HdrHistogram.copy_corrected_for_coordinated_omission(source, 1_000)
+    @test alias_copy == corrected
+    HdrHistogram.reset!(target)
+    @test HdrHistogram.copy_into_corrected_for_coordinated_omission!(target, source, 1_000) === target
+    @test target == corrected
+
+    self_corrected = copy(source)
+    @test HdrHistogram.copy_corrected!(self_corrected, self_corrected, 1_000) === self_corrected
+    @test self_corrected == corrected
+end
+
+@testset "Range and Inverse Queries" begin
+    for histogram in (
+        HdrHistogram.Histogram(Int16, 1, 1_000_000, 3),
+        HdrHistogram.AtomicHistogram(Int32, 1, 1_000_000, 3),
+        HdrHistogram.ConcurrentHistogram(Int64, 1, 1_000_000, 3),
+        HdrHistogram.SynchronizedHistogram(Int16, 1, 1_000_000, 3),
+    )
+        @test HdrHistogram.min_nonzero(histogram) == typemax(Int64)
+        @test HdrHistogram.min_nonzero_value(histogram) == typemax(Int64)
+        @test HdrHistogram.percentile_at_or_below_value(histogram, 10) == 100.0
+        @test HdrHistogram.count_between_values(histogram, 0, typemax(Int64)) == 0
+
+        HdrHistogram.record_value!(histogram, 0, 2)
+        HdrHistogram.record_value!(histogram, 10, 3)
+        HdrHistogram.record_value!(histogram, 10_000)
+        @test HdrHistogram.min_nonzero(histogram) == 10
+        @test HdrHistogram.count_between_values(histogram, 0, 10) == 5
+        @test HdrHistogram.count_between_values(histogram, 11, 9_999) == 0
+        @test HdrHistogram.count_between_values(histogram, 10_000, typemax(Int64)) == 1
+        @test HdrHistogram.count_between_values(histogram, 10_000, 10) == 0
+        @test HdrHistogram.percentile_at_or_below_value(histogram, 0) ≈ 100 / 3
+        @test HdrHistogram.percentile_at_or_below_value(histogram, 10) ≈ 250 / 3
+        @test HdrHistogram.percentile_at_or_below_value(histogram, typemax(Int64)) == 100.0
+        @test_throws ArgumentError HdrHistogram.count_between_values(histogram, -1, 10)
+        @test_throws ArgumentError HdrHistogram.percentile_at_or_below_value(histogram, -1)
+    end
+end
+
+@testset "Subtraction and Semantic Equality" begin
+    for C in (Int16, Int32, Int64)
+        for constructor in (
+            HdrHistogram.Histogram,
+            HdrHistogram.AtomicHistogram,
+            HdrHistogram.ConcurrentHistogram,
+            HdrHistogram.SynchronizedHistogram,
+        )
+            target = constructor(C, 1, 1_000_000, 3)
+            HdrHistogram.record_value!(target, 0, 2)
+            HdrHistogram.record_value!(target, 10, 3)
+            HdrHistogram.record_value!(target, 10_000)
+            HdrHistogram.start_time_stamp!(target, 100)
+            HdrHistogram.end_time_stamp!(target, 400)
+            HdrHistogram.tag!(target, "keep")
+
+            source = constructor(C, 1, 1_000_000, 3)
+            HdrHistogram.record_value!(source, 0)
+            HdrHistogram.record_value!(source, 10, 2)
+            @test HdrHistogram.subtract!(target, source) === target
+            @test HdrHistogram.total_count(target) == 3
+            @test HdrHistogram.count_at_value(target, 0) == 1
+            @test HdrHistogram.count_at_value(target, 10) == 1
+            @test HdrHistogram.count_at_value(target, 10_000) == 1
+            @test HdrHistogram.start_time_stamp(target) == 100
+            @test HdrHistogram.end_time_stamp(target) == 400
+            @test HdrHistogram.tag(target) == "keep"
+        end
+    end
+
+    # A lower-resolution destination exercises value remapping and rollback.
+    destination = HdrHistogram.Histogram(1, 1_000_000, 2)
+    append!(destination, (10, 100_000))
+    before = copy(destination)
+    too_many = HdrHistogram.Histogram(1, 1_000_000, 3)
+    HdrHistogram.record_value!(too_many, 10)
+    HdrHistogram.record_value!(too_many, 100_000, 2)
+    @test_throws ArgumentError HdrHistogram.subtract!(destination, too_many)
+    @test destination == before
+
+    removable = HdrHistogram.Histogram(1, 1_000_000, 3)
+    HdrHistogram.record_value!(removable, 10)
+    @test HdrHistogram.subtract(destination, removable) === destination
+    @test HdrHistogram.total_count(destination) == 1
+
+    out_of_range = HdrHistogram.Histogram(1, 10_000_000, 2)
+    HdrHistogram.record_value!(out_of_range, 10_000_000)
+    unchanged = copy(destination)
+    @test_throws ArgumentError HdrHistogram.subtract!(destination, out_of_range)
+    @test destination == unchanged
+
+    self = HdrHistogram.Histogram(1, 1_000, 2)
+    append!(self, (10, 20))
+    HdrHistogram.start_time_stamp!(self, 7)
+    HdrHistogram.end_time_stamp!(self, 9)
+    HdrHistogram.tag!(self, "preserved")
+    @test HdrHistogram.subtract!(self, self) === self
+    @test HdrHistogram.total_count(self) == 0
+    @test HdrHistogram.start_time_stamp(self) == 7
+    @test HdrHistogram.end_time_stamp(self) == 9
+    @test HdrHistogram.tag(self) == "preserved"
+
+    small = HdrHistogram.Histogram(Int16, 1, 1_000, 3)
+    large = HdrHistogram.AtomicHistogram(Int64, 1, 1_000_000, 3)
+    append!(small, (1, 10, 100))
+    append!(large, (1, 10, 100))
+    @test small == large
+    @test large == small
+    @test hash(small) == hash(large)
+    HdrHistogram.start_time_stamp!(small, 1)
+    HdrHistogram.start_time_stamp!(large, 2)
+    HdrHistogram.tag!(small, "left")
+    HdrHistogram.tag!(large, "right")
+    @test small == large
+    HdrHistogram.record_value!(large, 200)
+    @test small != large
+
+    different_precision = HdrHistogram.Histogram(1, 1_000, 2)
+    append!(different_precision, (1, 10, 100))
+    @test small != different_precision
+
+    different_ratio = HdrHistogram._init_with_config(
+        HdrHistogram.Histogram{Int16}, 1, 1_000, 3, false, 0.5, 0)
+    append!(different_ratio, (1, 10, 100))
+    @test small != different_ratio
+end
+
 @testset "Auto Resize" begin
     h = HdrHistogram.Histogram(3)
     HdrHistogram.record_value!(h, 1)
@@ -656,6 +860,40 @@ end
             HdrHistogram.add_while_correcting_for_coordinated_omission(corrected, base, 1000)
             @test HdrHistogram.total_count(corrected) == expected_total
             @test HdrHistogram.value_at_percentile(corrected, 99.0) == expected_p99
+
+            java_features = split(readchomp(`$java -cp $classpath org.HdrHistogram.JavaInterop features`), ',')
+            source = HdrHistogram.Histogram(1, 1_000_000, 3)
+            HdrHistogram.record_value!(source, 0, 2)
+            HdrHistogram.record_value!(source, 10, 3)
+            HdrHistogram.record_value!(source, 10_000)
+            HdrHistogram.start_time_stamp!(source, 100)
+            HdrHistogram.end_time_stamp!(source, 400)
+            HdrHistogram.tag!(source, "source")
+            copied = copy(source)
+            larger_copy = HdrHistogram.Histogram(1, 2_000_000, 3)
+            copyto!(larger_copy, source)
+            corrected_copy = HdrHistogram.copy_corrected(source, 1_000)
+            remainder = copy(source)
+            removed = HdrHistogram.Histogram(1, 1_000_000, 3)
+            HdrHistogram.record_value!(removed, 0)
+            HdrHistogram.record_value!(removed, 10, 2)
+            HdrHistogram.subtract!(remainder, removed)
+
+            @test parse(Bool, java_features[1]) == (copied == source)
+            @test parse(Bool, java_features[2]) == (larger_copy == source)
+            @test parse(Int64, java_features[3]) == HdrHistogram.start_time_stamp(copied)
+            @test parse(Int64, java_features[4]) == HdrHistogram.end_time_stamp(copied)
+            @test parse(Bool, java_features[5]) == (HdrHistogram.tag(copied) === nothing)
+            @test parse(Int64, java_features[6]) == HdrHistogram.total_count(corrected_copy)
+            @test parse(Int64, java_features[7]) == HdrHistogram.value_at_percentile(corrected_copy, 99.0)
+            @test parse(Int64, java_features[8]) == HdrHistogram.min_nonzero(source)
+            @test parse(Int64, java_features[9]) == HdrHistogram.count_between_values(source, 0, 10)
+            @test parse(Float64, java_features[10]) ≈
+                  HdrHistogram.percentile_at_or_below_value(source, 10)
+            @test parse(Int64, java_features[11]) == HdrHistogram.total_count(remainder)
+            @test parse(Int64, java_features[12]) == HdrHistogram.count_at_value(remainder, 0)
+            @test parse(Int64, java_features[13]) == HdrHistogram.count_at_value(remainder, 10)
+            @test parse(Int64, java_features[14]) == HdrHistogram.count_at_value(remainder, 10_000)
         end
     end
 end
@@ -742,16 +980,39 @@ end
     HdrHistogram.stddev(h)
     HdrHistogram.value_at_percentile(h, 99.0)
     HdrHistogram.value_at_percentile(h, percentiles, values)
+    HdrHistogram.min_nonzero(h)
+    HdrHistogram.count_between_values(h, 100, 1_000)
+    HdrHistogram.percentile_at_or_below_value(h, 1_000)
 
     @test @allocated(HdrHistogram.mean(h)) == 0
     @test @allocated(HdrHistogram.stddev(h)) == 0
     @test @allocated(HdrHistogram.value_at_percentile(h, 99.0)) == 0
     @test @allocated(HdrHistogram.value_at_percentile(h, percentiles, values)) == 0
+    @test @allocated(HdrHistogram.min_nonzero(h)) == 0
+    @test @allocated(HdrHistogram.count_between_values(h, 100, 1_000)) == 0
+    @test @allocated(HdrHistogram.percentile_at_or_below_value(h, 1_000)) == 0
+    @test @allocated(hash(h)) == 0
 
     target = similar(h)
     HdrHistogram.add!(target, h)
     HdrHistogram.reset!(target)
     @test @allocated(HdrHistogram.add!(target, h)) == 0
+
+    copyto!(target, h)
+    @test @allocated(copyto!(target, h)) == 0
+    @test @allocated(target == h) == 0
+
+    removed = similar(h)
+    append!(removed, 100:200)
+    HdrHistogram.subtract!(target, removed)
+    copyto!(target, h)
+    @test @allocated(HdrHistogram.subtract!(target, removed)) == 0
+
+    correction_source = HdrHistogram.Histogram(1, 1_000_000, 3)
+    HdrHistogram.record_value!(correction_source, 10_000)
+    correction_target = similar(correction_source)
+    HdrHistogram.copy_corrected!(correction_target, correction_source, 1_000)
+    @test @allocated(HdrHistogram.copy_corrected!(correction_target, correction_source, 1_000)) == 0
 
     writer = HdrHistogram.BufferWriter(0)
     HdrHistogram.encode_into_byte_buffer!(writer, h)

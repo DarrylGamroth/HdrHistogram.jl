@@ -20,10 +20,13 @@ implementation.  The current supported features are:
 * Histogram log reader/writer
 * Recorder and SingleWriterRecorder interval sampling
 * Histogram log scanner/processor helpers
+* Copy/copy-to and coordinated-omission-corrected copies
+* Histogram subtraction, range/inverse queries, explicit non-zero minima, and semantic equality
 
 Features unlikely to be implemented:
 
 * Double histograms
+* Runtime histogram shifting or mutable auto-resize toggles (layout configuration remains immutable)
 
 # Performance notes
 
@@ -37,7 +40,8 @@ Features unlikely to be implemented:
 * For `SynchronizedHistogram`, keep iterators and multi-step reads inside `lock(h) do ... end` blocks.
 * `ConcurrentHistogram` auto-resize uses a writer phaser: ordinary inserts do not take the resize lock, while a resize still allocates and merges storage.
 * Narrow atomic counters use checked updates and throw `OverflowError` rather than wrapping through negative counts.
-* `mean`, `stddev`, `value_at_percentile`, and compatible-layout `add` use direct count-array kernels and do not require iterator state.
+* `mean`, `stddev`, percentile/range queries, compatible-layout `add`, `copyto!`,
+  equality, and `subtract!` use direct count-array kernels and do not require iterator state.
 * `push!`, `append!`, and `record_values!` provide idiomatic scalar and bulk recording APIs.
 * `EncodingWorkspace` and the `encode_into_*_byte_buffer!` methods reuse encoding storage.
 * The mutable `iterate!` cursor API remains available when explicit state reuse is convenient.

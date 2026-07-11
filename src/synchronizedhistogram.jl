@@ -71,6 +71,17 @@ function Base.lock(f::Function, h::SynchronizedHistogram)
     end
 end
 
+function Base.similar(h::SynchronizedHistogram{C}) where {C}
+    lock(h.lock)
+    try
+        return _init_with_config(SynchronizedHistogram{C}, lowest_discernible_value(h.inner),
+            highest_trackable_value(h.inner), significant_figures(h.inner), auto_resize(h.inner),
+            conversion_ratio(h.inner), normalizing_index_offset(h.inner))
+    finally
+        unlock(h.lock)
+    end
+end
+
 lowest_discernible_value(h::SynchronizedHistogram) = lowest_discernible_value(h.inner)
 highest_trackable_value(h::SynchronizedHistogram) = highest_trackable_value(h.inner)
 highest_trackable_value!(h::SynchronizedHistogram, value) = highest_trackable_value!(h.inner, value)
@@ -181,6 +192,121 @@ function add_while_correcting_for_coordinated_omission(h::SynchronizedHistogram,
     end
 end
 
+function Base.copyto!(target::SynchronizedHistogram, source::AbstractHistogram)
+    lock(target.lock)
+    try
+        copyto!(target.inner, source)
+        return target
+    finally
+        unlock(target.lock)
+    end
+end
+
+function Base.copyto!(target::AbstractHistogram, source::SynchronizedHistogram)
+    lock(source.lock)
+    try
+        return copyto!(target, source.inner)
+    finally
+        unlock(source.lock)
+    end
+end
+
+function Base.copyto!(target::SynchronizedHistogram, source::SynchronizedHistogram)
+    target === source && return target
+    first, second = target.identity < source.identity ? (target, source) : (source, target)
+    lock(first.lock)
+    lock(second.lock)
+    try
+        copyto!(target.inner, source.inner)
+        return target
+    finally
+        unlock(second.lock)
+        unlock(first.lock)
+    end
+end
+
+function copy_corrected!(target::SynchronizedHistogram, source::AbstractHistogram,
+    expected_interval::Integer)
+    lock(target.lock)
+    try
+        copy_corrected!(target.inner, source, expected_interval)
+        return target
+    finally
+        unlock(target.lock)
+    end
+end
+
+function copy_corrected!(target::AbstractHistogram, source::SynchronizedHistogram,
+    expected_interval::Integer)
+    lock(source.lock)
+    try
+        return copy_corrected!(target, source.inner, expected_interval)
+    finally
+        unlock(source.lock)
+    end
+end
+
+function copy_corrected!(target::SynchronizedHistogram, source::SynchronizedHistogram,
+    expected_interval::Integer)
+    if target === source
+        snapshot = copy(source)
+        return copy_corrected!(target, snapshot, expected_interval)
+    end
+
+    first, second = target.identity < source.identity ? (target, source) : (source, target)
+    lock(first.lock)
+    lock(second.lock)
+    try
+        copy_corrected!(target.inner, source.inner, expected_interval)
+        return target
+    finally
+        unlock(second.lock)
+        unlock(first.lock)
+    end
+end
+
+function subtract!(target::SynchronizedHistogram, source::AbstractHistogram)
+    lock(target.lock)
+    try
+        subtract!(target.inner, source)
+        return target
+    finally
+        unlock(target.lock)
+    end
+end
+
+function subtract!(target::AbstractHistogram, source::SynchronizedHistogram)
+    lock(source.lock)
+    try
+        return subtract!(target, source.inner)
+    finally
+        unlock(source.lock)
+    end
+end
+
+function subtract!(target::SynchronizedHistogram, source::SynchronizedHistogram)
+    if target === source
+        lock(target.lock)
+        try
+            subtract!(target.inner, source.inner)
+            return target
+        finally
+            unlock(target.lock)
+        end
+    end
+
+    first, second = target.identity < source.identity ? (target, source) : (source, target)
+    lock(first.lock)
+    lock(second.lock)
+    try
+        subtract!(target.inner, source.inner)
+        return target
+    finally
+        unlock(second.lock)
+        unlock(first.lock)
+    end
+end
+
 function record_values!(h::SynchronizedHistogram, values)
     lock(h.lock)
     try
@@ -228,6 +354,15 @@ function Base.max(h::SynchronizedHistogram)
     end
 end
 
+function min_nonzero(h::SynchronizedHistogram)
+    lock(h.lock)
+    try
+        return min_nonzero(h.inner)
+    finally
+        unlock(h.lock)
+    end
+end
+
 function mean(h::SynchronizedHistogram)
     lock(h.lock)
     try
@@ -255,10 +390,32 @@ function count_at_value(h::SynchronizedHistogram, value::Int64)
     end
 end
 
+count_at_value(h::SynchronizedHistogram, value::Integer) = count_at_value(h, Int64(value))
+
 function count_at_index(h::SynchronizedHistogram, index::Int64)
     lock(h.lock)
     try
         return count_at_index(h.inner, index)
+    finally
+        unlock(h.lock)
+    end
+end
+
+count_at_index(h::SynchronizedHistogram, index::Integer) = count_at_index(h, Int64(index))
+
+function percentile_at_or_below_value(h::SynchronizedHistogram, value::Integer)
+    lock(h.lock)
+    try
+        return percentile_at_or_below_value(h.inner, value)
+    finally
+        unlock(h.lock)
+    end
+end
+
+function count_between_values(h::SynchronizedHistogram, low_value::Integer, high_value::Integer)
+    lock(h.lock)
+    try
+        return count_between_values(h.inner, low_value, high_value)
     finally
         unlock(h.lock)
     end
@@ -304,6 +461,46 @@ function percentile_print(io::IO, h::SynchronizedHistogram, ticks_per_half_dista
     lock(h.lock)
     try
         return percentile_print(io, h.inner, ticks_per_half_distance, value_scale)
+    finally
+        unlock(h.lock)
+    end
+end
+
+function Base.:(==)(left::SynchronizedHistogram, right::AbstractHistogram)
+    lock(left.lock)
+    try
+        return left.inner == right
+    finally
+        unlock(left.lock)
+    end
+end
+
+function Base.:(==)(left::AbstractHistogram, right::SynchronizedHistogram)
+    lock(right.lock)
+    try
+        return left == right.inner
+    finally
+        unlock(right.lock)
+    end
+end
+
+function Base.:(==)(left::SynchronizedHistogram, right::SynchronizedHistogram)
+    left === right && return true
+    first, second = left.identity < right.identity ? (left, right) : (right, left)
+    lock(first.lock)
+    lock(second.lock)
+    try
+        return left.inner == right.inner
+    finally
+        unlock(second.lock)
+        unlock(first.lock)
+    end
+end
+
+function Base.hash(h::SynchronizedHistogram, seed::UInt)
+    lock(h.lock)
+    try
+        return hash(h.inner, seed)
     finally
         unlock(h.lock)
     end

@@ -83,6 +83,39 @@ function _add_direct!(h::Histogram, from::Histogram)
     return _finish_direct_add!(h, from, observed_total)
 end
 
+function _subtract_direct!(h::Histogram{C}, from::Histogram) where {C}
+    destination_counts = counts(h)
+    source_counts = counts(from)
+    @inbounds for i in eachindex(destination_counts, source_counts)
+        source_count = Int64(source_counts[i])
+        destination_count = Int64(destination_counts[i])
+        if source_count > 0 && source_count > destination_count
+            logical_index = normalize_index(i - 1, -normalizing_index_offset(from), length(source_counts))
+            _throw_subtract_count(value_at_index(from, logical_index), source_count, destination_count)
+        end
+    end
+
+    observed_total_count = Int64(0)
+    min_non_zero_index = typemax(Int64)
+    max_index = Int64(-1)
+    offset = normalizing_index_offset(h)
+    counts_len = length(destination_counts)
+    @inbounds @simd for i in eachindex(destination_counts, source_counts)
+        source_count = max(Int64(source_counts[i]), 0)
+        remaining = Int64(destination_counts[i]) - source_count
+        destination_counts[i] = convert(C, remaining)
+        if remaining > 0
+            logical_index = offset == 0 ? i - 1 : normalize_index(i - 1, -offset, counts_len)
+            observed_total_count += remaining
+            max_index = max(max_index, logical_index)
+            logical_index == 0 || (min_non_zero_index = min(min_non_zero_index, logical_index))
+        end
+    end
+    min_non_zero_index == typemax(Int64) && (min_non_zero_index = -1)
+    return _set_internal_counters_from_observed!(h, observed_total_count,
+        min_non_zero_index, max_index)
+end
+
 """
     Histogram(C::Type{<:Signed}, lowest_discernible_value, highest_trackable_value, significant_figures)
 
