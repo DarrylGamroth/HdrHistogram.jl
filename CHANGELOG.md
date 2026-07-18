@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0 - 2026-07-11
+## 0.4.0 - 2026-07-18
 
 ### Added
 
@@ -13,6 +13,7 @@
   workspaces, and benchmark coverage for the new operations.
 - Aqua package-quality checks and Codecov uploads authenticated with GitHub
   OpenID Connect.
+- Weekly GitHub Actions dependency updates through Dependabot.
 
 ### Changed
 
